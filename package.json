@@ -14,7 +14,7 @@
     "start:prod": "node dist/main",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "lint": "oxlint",
-    "test": "bun test",
+    "test": "bun test test/",
     "test:cov": "bun test --coverage",
     "test:unit": "bun test test/unit",
     "test:integration": "bun test test/integration",
@@ -29,7 +29,8 @@
     "test:load": "bun run load-test.ts",
     "infra:up": "docker compose up -d",
     "infra:down": "docker compose down -v",
-    "infra:queues": "bash scripts/create-queues.sh"
+    "infra:queues": "bash scripts/create-queues.sh",
+    "test:coverage": "bun test --coverage test/"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "^3.1152.0",
