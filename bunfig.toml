@@ -1,0 +1,4 @@
+[run]
+  # Bun 1.4 requires explicit .js extensions for relative imports in ESM.
+  # We keep imports without extensions and let Bun resolve via this config.
+  preload = []
