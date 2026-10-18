@@ -73,7 +73,6 @@ describe('OutboxMessage.isDue', () => {
   it('nextAttemptAt no futuro → não due', () => {
     const msg = makePending();
     msg.scheduleRetry(new Date());
-    // after scheduleRetry, nextAttemptAt = now + base*2^1 + jitter ≥ 500ms
     const before = new Date(msg.nextAttemptAt!.getTime() - 1);
     expect(msg.isDue(before)).toBe(false);
   });
@@ -94,7 +93,7 @@ describe('OutboxMessage.scheduleRetry', () => {
     expect(msg.attempts).toBe(2);
   });
 
-  it('agenda nextAttemptAt no futuro com backoff', () => {
+  it('agenda nextAttemptAt no futuro', () => {
     const msg = makePending();
     const now = new Date('2026-10-18T21:00:00Z');
     msg.scheduleRetry(now);
@@ -102,25 +101,47 @@ describe('OutboxMessage.scheduleRetry', () => {
     expect(msg.nextAttemptAt!.getTime()).toBeGreaterThan(now.getTime());
   });
 
-  it('backoff cresce com attempts', () => {
+  it('backoff cresce com attempts (nas primeiras tentativas)', () => {
     const now = new Date();
     const msg = makePending();
     msg.scheduleRetry(now);
     const delay1 = msg.nextAttemptAt!.getTime() - now.getTime();
     msg.scheduleRetry(now);
     const delay2 = msg.nextAttemptAt!.getTime() - now.getTime();
+    // Com jitter ±25%, delay2_min (750) > delay1_max (625), sempre.
     expect(delay2).toBeGreaterThan(delay1);
   });
 
-  it('backoff limitado a 30s (jitter ±25% incluído)', () => {
+  it('backoff limitado a 30s ±25% (delay ∈ [22_500, 37_500])', () => {
+    // Regressão para bug de jitter: implementação antiga produzia
+    // jitter ∈ [0, 50%] (nunca negativo), estourando 30_000 → até 45_000.
+    // Com ±25% real, o teto efetivo é 37_500ms.
     const now = new Date();
     const msg = makePending();
-    // Muitas tentativas para estourar o teto
-    for (let i = 0; i < 20; i++) msg.scheduleRetry(now);
+    for (let i = 0; i < 20; i++) msg.scheduleRetry(now); // satura em MAX
     const delay = msg.nextAttemptAt!.getTime() - now.getTime();
-    // 30_000 + jitter até 25% = 37_500 max
-    expect(delay).toBeLessThanOrEqual(37_500);
-    expect(delay).toBeGreaterThanOrEqual(30_000);
+    expect(delay).toBeLessThanOrEqual(37_500);   // teto superior
+    expect(delay).toBeGreaterThanOrEqual(22_500); // teto inferior (jitter -25%)
+  });
+
+  it('múltiplas amostras do backoff saturado cabem em [22_500, 37_500]', () => {
+    // Prova empírica (100 amostras): garante que o jitter é simétrico
+    // (nunca extrapola +25%, nunca abaixo de -25%).
+    const now = new Date();
+    const samples: number[] = [];
+    for (let s = 0; s < 100; s++) {
+      const msg = makePending();
+      for (let i = 0; i < 20; i++) msg.scheduleRetry(now);
+      samples.push(msg.nextAttemptAt!.getTime() - now.getTime());
+    }
+    for (const d of samples) {
+      expect(d).toBeGreaterThanOrEqual(22_500);
+      expect(d).toBeLessThanOrEqual(37_500);
+    }
+    // A média deve ficar próxima de 30_000 (jitter simétrico = média 0)
+    const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
+    expect(mean).toBeGreaterThan(27_000);
+    expect(mean).toBeLessThan(33_000);
   });
 });
 

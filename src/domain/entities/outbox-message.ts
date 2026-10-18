@@ -22,11 +22,26 @@ export interface EnqueueOutboxProps {
 /** Backoff exponencial com jitter. */
 const BASE_BACKOFF_MS = 250;
 const MAX_BACKOFF_MS = 30_000;
+/** Fração de jitter sobre o delay calculado (0.25 = ±25%). */
+const JITTER_FRACTION = 0.25;
 
+/**
+ * Calcula o próximo `nextAttemptAt` com backoff exponencial e jitter simétrico.
+ *
+ * Jitter ∈ [-JITTER_FRACTION, +JITTER_FRACTION] × delay (default ±25%).
+ * O sinal simétrico evita thundering herd tão bem quanto jitter positivo
+ * (Google SRE book / AWS architecture blog), mas mantém a distribuição
+ * centrada em `delay` — o delay efetivo nunca desvia mais que ±25%.
+ *
+ * ⚠️ Nota histórica: a implementação anterior usava
+ * `delay * (0.5 * (1 - Math.random()))`, que produzia jitter em `[0, 50%]`
+ * (sempre positivo), apesar do comentário dizer "±25%". O teste
+ * `backoff limitado a 30s (jitter ±25% incluído)` expôs a discrepância
+ * em CI (delay de 41.491ms > 37.500ms esperado). Corrigido para ±25% real.
+ */
 function nextAttemptAt(now: Date, attempts: number): Date {
   const delay = Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * Math.pow(2, attempts));
-  // jitter ±25%
-  const jitter = delay * (0.5 * (1 - Math.random()));
+  const jitter = delay * JITTER_FRACTION * (2 * Math.random() - 1);
   return new Date(now.getTime() + delay + jitter);
 }
 

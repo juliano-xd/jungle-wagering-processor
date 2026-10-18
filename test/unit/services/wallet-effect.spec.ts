@@ -7,15 +7,28 @@ import {
 } from '../../../src/domain/entities/wager-transaction.js';
 import { Money } from '../../../src/domain/value-objects/money.js';
 import { LedgerDirection } from '../../../src/domain/entities/wallet-ledger-entry.js';
+import {
+  FailureCode,
+  WagerTransactionError,
+} from '../../../src/domain/errors/wager-transaction.error.js';
 
+/**
+ * Cria wallet com saldo desejado.
+ *
+ * ⚠️ `Wallet.credit` PROÍBE amount zero. Para `balance='0.00'`, apenas abre
+ * a wallet (sem `credit`). Bug pego por TDD: helper antigo chamava
+ * `credit(0.00)` e estourava em `ZERO_AMOUNT`.
+ */
 function makeWallet(balance: string): Wallet {
   const w = Wallet.open({
     id: crypto.randomUUID(),
     playerId: crypto.randomUUID(),
     initialBalance: Money.zero('BRL'),
   });
-  w.credit(Money.from({ amount: balance, currency: 'BRL' }), crypto.randomUUID());
-  w.version = 1;
+  if (balance !== '0.00') {
+    w.credit(Money.from({ amount: balance, currency: 'BRL' }), crypto.randomUUID());
+    w.version = 1;
+  }
   return w;
 }
 
@@ -58,7 +71,13 @@ describe('applyBalanceEffect — BET (debit)', () => {
     const tx = makeTx(WagerTransactionKind.Bet, {
       money: Money.from({ amount: '50.00', currency: 'BRL' }),
     });
-    expect(() => applyBalanceEffect(wallet, tx, null)).toThrow(/insufficient/i);
+    try {
+      applyBalanceEffect(wallet, tx, null);
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(WagerTransactionError);
+      expect((e as WagerTransactionError).code).toBe(FailureCode.InsufficientFunds);
+    }
   });
 });
 
@@ -75,7 +94,8 @@ describe('applyBalanceEffect — WIN (credit)', () => {
 });
 
 describe('applyBalanceEffect — OPENING (credit)', () => {
-  it('credita e retorna ledger CREDIT', () => {
+  it('credita e retorna ledger CREDIT (wallet zerada)', () => {
+    // makeWallet('0.00') agora abre wallet SEM chamar credit(0.00).
     const wallet = makeWallet('0.00');
     const tx = makeTx(WagerTransactionKind.Opening, {
       money: Money.from({ amount: '100.00', currency: 'BRL' }),
@@ -140,6 +160,7 @@ describe('applyBalanceEffect — ROLLBACK', () => {
   });
 
   it('reverter WIN com saldo insuficiente → NEGATIVE_BALANCE_WOULD_RESULT', () => {
+    // Saldo atual 15.00; reverter WIN de 100.00 produziria -85.00.
     const wallet = makeWallet('15.00');
     const winRef = makeTx(WagerTransactionKind.Win, {
       money: Money.from({ amount: '100.00', currency: 'BRL' }),
@@ -148,25 +169,37 @@ describe('applyBalanceEffect — ROLLBACK', () => {
       money: Money.from({ amount: '100.00', currency: 'BRL' }),
       referenceExternalTransactionId: 'win-ext',
     });
-    expect(() => applyBalanceEffect(wallet, rb, winRef)).toThrow(
-      /negative balance would result/i,
-    );
+
+    // Checa `error.code` (mais robusto que string matching — a mensagem
+    // exata do erro é `"Reversal would produce a negative balance"`).
+    try {
+      applyBalanceEffect(wallet, rb, winRef);
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(WagerTransactionError);
+      expect((e as WagerTransactionError).code).toBe(
+        FailureCode.NegativeBalanceWouldResult,
+      );
+    }
+
+    // Saldo NÃO muda após rejeição
     expect(wallet.balance.toJSON()).toEqual({ amount: '15.00', currency: 'BRL' });
   });
 
-  it('ROLLBACK sem referência explícita usa direção default (Crédito)', () => {
-    // ledgerDirectionFor(undefined) para Rollback retorna Credit.
+  it('falha explicitamente se reference=null (defesa em profundidade)', () => {
+    // O service NUNCA passa null em ROLLBACK (garante requiresReference +
+    // resolveReferenceTx + PENDING_REFERENCE). Se chegar null, é bug de
+    // estado — falha com mensagem clara, não com TypeError opaco.
     const wallet = makeWallet('100.00');
     const rb = makeTx(WagerTransactionKind.Rollback, {
       money: Money.from({ amount: '30.00', currency: 'BRL' }),
       referenceExternalTransactionId: 'orphan-ref',
     });
-    const entry = applyBalanceEffect(wallet, rb, null);
-    // reference=null → reference!.ledgerDirectionFor() lançaria; mas applyBalanceEffect
-    // usa `reference!` — se fosse null, quebraria. O service real passa reference válido.
-    // Aqui validamos que, com reference null, o comportamento é definido (crédito default).
-    expect(wallet.balance.toJSON()).toEqual({ amount: '130.00', currency: 'BRL' });
-    expect(entry!.direction).toBe(LedgerDirection.Credit);
+    expect(() => applyBalanceEffect(wallet, rb, null)).toThrow(
+      /ROLLBACK requires a reference transaction/i,
+    );
+    // E não altera o saldo
+    expect(wallet.balance.toJSON()).toEqual({ amount: '100.00', currency: 'BRL' });
   });
 });
 

@@ -1,9 +1,6 @@
-import { WagerTransaction, WagerTransactionKind, WagerTransactionStatus } from '../../domain/entities/wager-transaction.js';
-import { FailureCode } from '../../domain/errors/wager-transaction.error.js';
+import { WagerTransaction, WagerTransactionKind } from '../../domain/entities/wager-transaction.js';
 import { Wallet } from '../../domain/entities/wallet.js';
 import { WalletLedgerEntry, LedgerDirection } from '../../domain/entities/wallet-ledger-entry.js';
-import { Money } from '../../domain/value-objects/money.js';
-
 
 export interface SubmitTransactionRequest {
   providerId: string;
@@ -14,7 +11,7 @@ export interface SubmitTransactionRequest {
   roundId: string;
   gameId: string;
   kind: WagerTransactionKind;
-  money: Money;
+  money: import('../../domain/value-objects/money.js').Money;
   referenceExternalTransactionId?: string;
   payloadHash: string;
   inboxMessage?: {
@@ -25,37 +22,47 @@ export interface SubmitTransactionRequest {
 
 export interface SubmitTransactionResult {
   transactionId: string;
-  status: WagerTransactionStatus;
-  balanceAfter: Money;
+  status: import('../../domain/entities/wager-transaction.js').WagerTransactionStatus;
+  balanceAfter: import('../../domain/value-objects/money.js').Money;
   walletVersion: number;
   idempotentReplay: boolean;
-  /** Presente somente quando status === REJECTED. */
-  failureCode?: FailureCode;
+  failureCode?: import('../../domain/errors/wager-transaction.error.js').FailureCode;
 }
 
 export interface CreateWalletRequest {
   playerId: string;
-  initialBalance: Money;
+  initialBalance: import('../../domain/value-objects/money.js').Money;
 }
 
 export interface CreateWalletResult {
   walletId: string;
-  balance: Money;
+  balance: import('../../domain/value-objects/money.js').Money;
   version: number;
 }
 
 export interface ReconcileWalletResult {
   walletId: string;
-  storedBalance: Money;
-  calculatedBalance: Money;
-  difference: Money;
+  storedBalance: import('../../domain/value-objects/money.js').Money;
+  calculatedBalance: import('../../domain/value-objects/money.js').Money;
+  difference: import('../../domain/value-objects/money.js').Money;
   consistent: boolean;
   checkedEntries: number;
 }
 
 /**
  * Aplica o efeito financeiro de uma transação já validada no wallet aggregate.
- * LOSS não gera lançamento no ledger (retorna undefined).
+ *
+ * **Pré-condições (garantidas por `WageringService`):**
+ *   - `wallet` está lockada (`PESSIMISTIC_WRITE`);
+ *   - `tx.requiresReference()` foi resolvido antes — se `Rollback`/`Refund`
+ *     chegou com referência ausente, o service retornou `PENDING_REFERENCE`
+ *     e **não** chama `applyBalanceEffect`.
+ *
+ * **Invariantes:**
+ *   - `LOSS` não gera lançamento (retorna `undefined`);
+ *   - `ROLLBACK` **exige** `reference` não-nulo — a checagem explícita abaixo
+ *     é defesa em profundidade: se o service algum dia regredir e passar null,
+ *     a falha é explícita em vez de `TypeError: null is not an object`.
  */
 export function applyBalanceEffect(
   wallet: Wallet,
@@ -67,14 +74,25 @@ export function applyBalanceEffect(
   switch (tx.kind) {
     case WagerTransactionKind.Bet:
       return wallet.debit(tx.money, tx.id);
+
     case WagerTransactionKind.Opening:
     case WagerTransactionKind.Win:
     case WagerTransactionKind.Refund:
       return wallet.credit(tx.money, tx.id);
+
     case WagerTransactionKind.Rollback: {
-      const refDir = reference!.ledgerDirectionFor() || LedgerDirection.Debit;
+      // Defesa em profundidade: `WageringService` só chama com `reference`
+      // resolvido. Se chegar null, é bug de estado — falha cedo com mensagem
+      // clara em vez de `TypeError`.
+      if (!reference) {
+        throw new Error(
+          'applyBalanceEffect: ROLLBACK requires a reference transaction (invariant violated)',
+        );
+      }
+      const refDir = reference.ledgerDirectionFor() ?? LedgerDirection.Debit;
       return wallet.applyRollback(refDir, tx.money, tx.id);
     }
+
     default:
       return undefined;
   }
