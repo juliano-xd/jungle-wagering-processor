@@ -19,7 +19,7 @@
  */
 import { NestFactory } from '@nestjs/core';
 import type { INestApplication } from '@nestjs/common';
-import { EntityManager, MikroORM } from '@mikro-orm/core';
+import { MikroORM } from '@mikro-orm/core';
 import { AppModule } from '../../src/app.module.js';
 
 const CONCURRENCY = Number(process.env.LOAD_CONCURRENCY ?? 100);
@@ -29,6 +29,16 @@ const SCENARIO_B_WALLET_COUNT = 100;
 const SCENARIO_B_BALANCE = '1000.00';
 
 type Result = { status: number; durationMs: number; ok: boolean; error?: string };
+
+/**
+ * Tipo exato que `MikroORM.init()` retorna.
+ *
+ * `MikroORM.init()` infere `entities` como `readonly [...]` (array readonly)
+ * a partir do `defineConfig`. Usar `MikroORM` (genérico mutável) no parâmetro
+ * causa erro TS2345: "readonly cannot be assigned to mutable". `Awaited<
+ * ReturnType<typeof MikroORM.init>>` preserva a assinatura real.
+ */
+type AppOrm = Awaited<ReturnType<typeof MikroORM.init>>;
 
 async function main(): Promise<void> {
   console.log('═══════════════════════════════════════════════════════');
@@ -48,7 +58,7 @@ async function main(): Promise<void> {
   const app: INestApplication = await NestFactory.create(AppModule, { logger: false });
   await app.listen(0);
   const baseUrl = (await app.getUrl()).replace(/\/$/, '');
-  const orm = app.get(MikroORM);
+  const orm = app.get(MikroORM) as AppOrm;
 
   // 2. Truncar para estado limpo (usa DB de teste)
   await orm.em.getConnection().execute(
@@ -94,7 +104,7 @@ async function runScenario(
   label: string,
   baseUrl: string,
   buildRequests: () => Promise<Array<() => Promise<Result>>>,
-  orm: MikroORM,
+  orm: AppOrm,
 ): Promise<void> {
   console.log('───────────────────────────────────────────────────────');
   console.log(`  ${label}`);
@@ -115,12 +125,10 @@ async function runScenario(
   // Under burst, o outbox lag é ESPERADO. Transactional outbox troca
   // latência por durabilidade. O que importa é: drena em tempo razoável?
   const drainStart = performance.now();
-  let lastPending = -1;
   let drainedAt = -1;
   while (performance.now() - drainStart < 30_000) {
     const m = await readMetrics(baseUrl);
     const pending = gaugeValue(m, 'outbox_pending');
-    lastPending = pending;
     if (pending === 0) {
       drainedAt = performance.now();
       break;
@@ -321,7 +329,6 @@ function histogramPercentile(text: string, name: string, p: number): number {
   for (const line of text.split('\n')) {
     if (!line.startsWith(`${name}_bucket`)) continue;
     const parts = line.trim().split(/\s+/);
-    // parts[0] = `name_bucket{le="..."}`, parts[1] = count
     const leMatch = parts[0]?.match(/le="([^"]+)"/);
     if (!leMatch || parts.length < 2) continue;
     const le = leMatch[1] === '+Inf' ? Infinity : Number(leMatch[1]);
@@ -343,7 +350,7 @@ function percentile(sorted: number[], p: number): number {
   return sorted[Math.max(0, idx)];
 }
 
-async function countRow(orm: MikroORM, sql: string): Promise<string> {
+async function countRow(orm: AppOrm, sql: string): Promise<string> {
   const [{ c }] = await orm.em.getConnection().execute<Array<{ c: string }>>(sql);
   return String(c);
 }

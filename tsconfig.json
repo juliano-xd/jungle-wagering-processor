@@ -22,10 +22,8 @@
   "include": [
     "src",
     "scripts",
-    "mikro-orm.config.ts",
-    "db-fresh.ts",
-    "smoke.ts",
-    "load-test.ts"
+    "test",
+    "mikro-orm.config.ts"
   ],
   "exclude": ["node_modules", "dist", "**/*.mjs", "**/*.spec.ts", "**/*.e2e-spec.ts"]
 }
