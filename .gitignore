@@ -49,3 +49,5 @@ start:dev.txt
 _backup-specs/
 _backup-cleanup/
 *.legacy-REMOVED
+package.json.pre-*
+*.pre-*
