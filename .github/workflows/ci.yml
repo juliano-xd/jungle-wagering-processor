@@ -33,7 +33,7 @@ jobs:
           --health-retries 10
 
       localstack:
-        image: localstack/localstack:latest
+        image: nahuelnucera/ministack:latest
         env:
           SERVICES: sqs
           EAGER_SERVICE_LOADING: 1
