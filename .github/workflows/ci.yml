@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    name: Test (Bun + Postgres + LocalStack)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: wagering_db
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      localstack:
+        image: localstack/localstack:3.8
+        env:
+          SERVICES: sqs
+          AWS_DEFAULT_REGION: us-east-1
+        ports:
+          - 4566:4566
+        options: >-
+          --health-cmd "awslocal sqs list-queues > /dev/null 2>&1 || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5433
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: wagering_db
+      DB_NAME_TEST: wagering_db_test
+      SQS_ENDPOINT: http://localhost:4566
+      SQS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bunx tsc --noEmit
+
+      - name: Create test database
+        run: bun run db:create-test
+
+      - name: Run migrations on test DB
+        run: |
+          NODE_ENV=test bun run mikro-orm migration:up
+
+      - name: Create SQS queues on LocalStack
+        run: |
+          aws --endpoint-url=http://localhost:4566 sqs create-queue \
+            --queue-name wager-transactions-dlq.fifo \
+            --attributes '{"FifoQueue":"true","ContentBasedDeduplication":"false"}'
+          aws --endpoint-url=http://localhost:4566 sqs create-queue \
+            --queue-name wager-transactions.fifo \
+            --attributes '{"FifoQueue":"true","ContentBasedDeduplication":"false"}'
+        env:
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+
+      - name: Run tests
+        run: bun run test
+
+      - name: Run SQS real tests
+        run: bun run test:sqs
+
+      - name: Verify schema invariants
+        run: bun run db:verify
+        env:
+          DB_PORT: 5433
+          DB_NAME: wagering_db_test

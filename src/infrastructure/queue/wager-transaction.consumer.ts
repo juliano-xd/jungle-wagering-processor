@@ -15,7 +15,7 @@ import { WageringService } from '../../application/services/wagering.service.js'
 import { WagerTransactionError } from '../../domain/errors/wager-transaction.error.js';
 import { WagerTransactionKind } from '../../domain/entities/wager-transaction.js';
 import { Money } from '../../domain/value-objects/money.js';
-import { payloadHashOf } from '../../domain/services/canonical-json.js';
+import { computeSubmitPayloadHash } from '../../application/services/payload-hash.js';
 import { MetricsService } from '../observability/metrics.service.js';
 
 const CONSUMER_NAME = 'wager-tx-consumer';
@@ -195,8 +195,12 @@ export class WagerTransactionConsumer
         JSON.stringify({
           event: 'wager_consumer.processed',
           instanceId: this.instanceId,
+          correlationId: envelope.data.idempotencyKey,
           messageId: msg.messageId,
-          txId: result.transactionId,
+          transactionId: result.transactionId,
+          walletId: envelope.data.walletId,
+          providerId: envelope.data.providerId,
+          kind: envelope.data.kind,
           status: result.status,
           idempotentReplay: result.idempotentReplay,
         }),
@@ -209,7 +213,11 @@ export class WagerTransactionConsumer
           JSON.stringify({
             event: 'wager_consumer.domain_error',
             instanceId: this.instanceId,
+            correlationId: envelope.data.idempotencyKey,
             messageId: msg.messageId,
+            walletId: envelope.data.walletId,
+            providerId: envelope.data.providerId,
+            kind: envelope.data.kind,
             code: err.code,
             message: err.message,
           }),
@@ -223,7 +231,10 @@ export class WagerTransactionConsumer
         JSON.stringify({
           event: 'wager_consumer.transient_error',
           instanceId: this.instanceId,
+          correlationId: envelope.data.idempotencyKey,
           messageId: msg.messageId,
+          walletId: envelope.data.walletId,
+          providerId: envelope.data.providerId,
           message: err instanceof Error ? err.message : String(err),
         }),
       );
@@ -234,7 +245,7 @@ export class WagerTransactionConsumer
 }
 
 function payloadHashForEnvelope(env: WagerTransactionRequestedEnvelope): string {
-  return payloadHashOf({
+  return computeSubmitPayloadHash({
     providerId: env.data.providerId,
     externalTransactionId: env.data.externalTransactionId,
     playerId: env.data.playerId,
@@ -243,6 +254,6 @@ function payloadHashForEnvelope(env: WagerTransactionRequestedEnvelope): string 
     gameId: env.data.gameId,
     kind: env.data.kind,
     money: env.data.money,
-    referenceExternalTransactionId: env.data.referenceExternalTransactionId ?? null,
+    referenceExternalTransactionId: env.data.referenceExternalTransactionId,
   });
 }

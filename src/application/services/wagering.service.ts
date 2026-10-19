@@ -339,6 +339,20 @@ export class WageringService {
 
           await em.flush();
           this.metrics?.transaction('PROCESSED');
+          this.logger.log(
+            JSON.stringify({
+              event: 'wagering.processed',
+              correlationId: req.idempotencyKey,
+              messageId: req.inboxMessage?.messageId,
+              transactionId: tx.id,
+              walletId: wallet.id,
+              providerId: req.providerId,
+              kind: req.kind,
+              money: tx.money.toJSON(),
+              balanceAfter: wallet.balance.toJSON(),
+              walletVersion: wallet.version,
+            }),
+          );
 
           return {
             transactionId: tx.id,
@@ -397,6 +411,18 @@ export class WageringService {
     );
     await em.flush();
     this.metrics?.transaction('REJECTED');
+    this.logger.warn(
+      JSON.stringify({
+        event: 'wagering.rejected',
+        correlationId,
+        transactionId: tx.id,
+        walletId: wallet.id,
+        providerId: tx.providerId,
+        kind: tx.kind,
+        failureCode: err.code,
+        message: err.message,
+      }),
+    );
     return {
       transactionId: tx.id,
       status: WagerTransactionStatus.Rejected,

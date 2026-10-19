@@ -154,10 +154,17 @@ export class OutboxPublisherWorker
             [attempts, backoff, row.id],
           );
           this.metrics?.outboxFailure();
+          // Extrai correlationId do payload (se existir).
+          const payload = ensureObject(row.payload);
+          const correlationId = (payload as { correlationId?: string }).correlationId;
+          const aggregateId = row.aggregate_id;
+
           this.logger.warn(
             JSON.stringify({
               event: 'outbox.publish_failed',
               instanceId: this.instanceId,
+              correlationId,
+              aggregateId,
               outboxId: row.id,
               eventType: row.event_type,
               attempts,

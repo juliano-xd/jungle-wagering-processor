@@ -44,6 +44,125 @@ com crash entre commit e ack, ou com eventos publicados mais de uma vez
   workers). Testes de integração exercitam o agregado real contra
   PostgreSQL.
 
+### 2.1 Fluxos principais
+
+#### Fluxo síncrono (HTTP POST /wagering/transactions)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Cliente
+    participant WC as WageringController
+    participant WS as WageringService
+    participant DB as PostgreSQL
+    participant OB as Outbox
+
+    C->>WC: POST /wagering/transactions (Idempotency-Key)
+    WC->>WC: validate body + UUID
+    WC->>WC: compute payloadHash
+    WC->>WS: submitTransaction(dto)
+
+    WS->>DB: BEGIN
+    WS->>DB: SELECT wallet FOR UPDATE (PESSIMISTIC_WRITE)
+    WS->>DB: SELECT idempotency_record (key)
+    alt IdempotencyRecord existe + hash igual
+        DB-->>WS: record anterior
+        WS->>DB: COMMIT
+        WS-->>WC: { status, balanceAfter, idempotentReplay: true }
+    else IdempotencyRecord existe + hash diferente
+        WS->>DB: ROLLBACK
+        WS-->>WC: throw DuplicateIdempotencyKey
+        WC-->>C: 409 Conflict
+    else Não existe
+        WS->>DB: INSERT wager_transaction
+        WS->>DB: INSERT wallet_ledger_entry
+        WS->>DB: UPDATE wallet (balance, version)
+        WS->>DB: INSERT idempotency_record
+        WS->>OB: INSERT outbox (WalletBalanceChanged, Processed)
+        WS->>DB: COMMIT
+        WS-->>WC: { status: PROCESSED, balanceAfter }
+        WC-->>C: 200 OK
+    end
+
+Fluxo PENDING_REFERENCE (referência fora de ordem)
+
+sequenceDiagram
+    autonumber
+    participant PR as Provider
+    participant WS as WageringService
+    participant DB as PostgreSQL
+    participant WK as PendingReferenceWorker
+
+    Note over PR,WK: ROLLBACK chega ANTES do WIN referenciado
+    PR->>WS: ROLLBACK ref=win-x
+    WS->>DB: BEGIN + lock wallet
+    WS->>DB: SELECT wager_tx WHERE ext_id='win-x'
+    DB-->>WS: null
+    WS->>DB: INSERT wager_tx (PENDING_REFERENCE)
+    WS->>DB: INSERT outbox (PendingReference)
+    WS->>DB: COMMIT
+    WS-->>PR: 202 Accepted
+
+    loop a cada 5s (backoff exponencial)
+        WK->>DB: SELECT PENDING_REFERENCE due
+        WK->>WS: retryPendingReference(txId)
+        WS->>DB: SELECT ref
+        alt referência ausente
+            WS->>DB: UPDATE attempts++, nextAttemptAt
+            WS-->>WK: 'pending'
+        else referência chegou
+            WS->>DB: aplica ROLLBACK + idempotency + outbox
+            WS-->>WK: 'processed'
+        else attempts > MAX
+            WS->>DB: REJECTED + failureCode=REFERENCE_NOT_FOUND
+            WS-->>WK: 'rejected'
+        end
+    end
+
+    Note over PR,WS: WIN-x chega
+    PR->>WS: WIN ext_id='win-x'
+    WS->>DB: INSERT wager_tx (PROCESSED, balance 130.00)
+    WS-->>PR: 200 OK
+
+    WK->>WS: retryPendingReference(rollback-tx-id)
+    WS->>DB: resolve reference → aplica ROLLBACK (balance 100.00)
+    WS-->>WK: 'processed'
+
+Fluxo de fila (SQS consumer)
+
+sequenceDiagram
+    autonumber
+    participant SQS as SQS wager-transactions.fifo
+    participant CON as WagerTransactionConsumer
+    participant WS as WageringService
+    participant DB as PostgreSQL
+    participant DLQ as SQS DLQ
+
+    loop poll a cada 1s
+        CON->>SQS: receiveMessage (long polling)
+        SQS-->>CON: [{ body, receiptHandle }]
+        CON->>CON: JSON.parse(body)
+        alt envelope inválido
+            CON->>SQS: deleteMessage (ack)
+        else envelope válido
+            CON->>WS: submitTransaction({ ...body, inboxMessage })
+            alt PROCESSED / PENDING_REFERENCE / REJECTED
+                WS-->>CON: resultado terminal
+                CON->>SQS: deleteMessage (ack pós-commit)
+            else WagerTransactionError (negócio)
+                WS-->>CON: throw
+                CON->>SQS: deleteMessage (ack + log — terminal)
+            else erro transitório (DB, timeout)
+                WS-->>CON: throw
+                alt receiveCount < maxReceiveCount
+                    CON->>SQS: changeMessageVisibility (nack, backoff)
+                else receiveCount >= maxReceiveCount
+                    SQS->>DLQ: RedrivePolicy move automaticamente
+                end
+            end
+        end
+    end
+
 ## 3. Persistência — MikroORM + PostgreSQL
 
 **Valor monetário**: colunas `NUMERIC(18,2)` no banco, mapeadas para string

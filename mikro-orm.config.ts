@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { WalletSchema } from './src/domain/entities/wallet.js';
 import { WalletLedgerEntrySchema } from './src/domain/entities/wallet-ledger-entry.js';
 import { WagerTransactionSchema } from './src/domain/entities/wager-transaction.js';

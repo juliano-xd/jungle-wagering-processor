@@ -10,20 +10,18 @@ import {
   Query,
   Res,
 } from '@nestjs/common';
+import {
+  ApiBody,
+  ApiOkResponse,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import type { Response } from 'express';
 import { WageringService } from '../../application/services/wagering.service.js';
 import type { CreateWalletBody } from '../../application/dtos/create-wallet.dto.js';
 import { Money } from '../../domain/value-objects/money.js';
 
-/**
- * UUID em formato canônico (8-4-4-4-12 hex, com hífens).
- *
- * NÃO valida a versão (v1–v8) nem a variante RFC 4122 — o Postgres aceita
- * qualquer UUID nesse formato, e o serviço usa UUIDs v7 (time-ordered)
- * gerados pelo `crypto.randomUUID()` do Node.
- *
- * Regex anterior `[1-5][0-9a-f]{3}` rejeitava v7 — bug encontrado no E2E.
- */
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -37,11 +35,49 @@ function assertUuid(value: unknown, field: string): asserts value is string {
   }
 }
 
+@ApiTags('wallets')
 @Controller('wallets')
 export class WalletsController {
   constructor(private readonly service: WageringService) {}
 
   @Post()
+  @ApiOperation({
+    summary: 'Cria wallet com saldo inicial',
+    description:
+      'O saldo inicial gera uma transação `OPENING` interna + `CREDIT` no ledger, ' +
+      'na mesma transação SQL. Wallet duplicada (mesmo `playerId` + `currency`) → 409.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['playerId', 'initialBalance'],
+      properties: {
+        playerId: { type: 'string', format: 'uuid' },
+        initialBalance: {
+          type: 'object',
+          required: ['amount', 'currency'],
+          properties: {
+            amount: { type: 'string', example: '100.00' },
+            currency: { type: 'string', example: 'BRL' },
+          },
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Wallet criada',
+    schema: {
+      example: {
+        id: '0192f291-27dd-7d3f-8071-5f8685deef37',
+        playerId: '0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1',
+        balance: { amount: '100.00', currency: 'BRL' },
+        version: 1,
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Payload inválido' })
+  @ApiResponse({ status: 409, description: 'Wallet duplicada (playerId+currency)' })
   async create(
     @Body() body: CreateWalletBody,
     @Res({ passthrough: true }) res: Response,
@@ -82,6 +118,10 @@ export class WalletsController {
   }
 
   @Get(':walletId')
+  @ApiOperation({ summary: 'Consulta uma wallet por ID' })
+  @ApiOkResponse({ description: 'Wallet encontrada' })
+  @ApiResponse({ status: 400, description: 'UUID inválido' })
+  @ApiResponse({ status: 404, description: 'Wallet não encontrada' })
   async getById(@Param('walletId') walletId: string) {
     if (!UUID_RE.test(walletId)) {
       throw new BadRequestException({
@@ -109,6 +149,15 @@ export class WalletsController {
   }
 
   @Get(':walletId/ledger')
+  @ApiOperation({
+    summary: 'Consulta o ledger paginado por cursor opaco',
+    description:
+      'Cursor keyset: `base64url(JSON({ createdAt, id }))`. Ordenação: ' +
+      '`created_at DESC, id DESC`. `limit` máximo 200.',
+  })
+  @ApiOkResponse({ description: 'Página do ledger' })
+  @ApiResponse({ status: 400, description: 'UUID ou cursor inválido' })
+  @ApiResponse({ status: 404, description: 'Wallet não encontrada' })
   async getLedger(
     @Param('walletId') walletId: string,
     @Query('cursor') cursor?: string,
@@ -141,6 +190,16 @@ export class WalletsController {
   }
 
   @Post(':walletId/reconciliation')
+  @ApiOperation({
+    summary: 'Reconciliação — recalcula saldo a partir do ledger',
+    description:
+      'Divergências NÃO são corrigidas silenciosamente: retorna `consistent: false` + ' +
+      '`difference`. Também incrementa `wallet_reconciliation_divergence_total` e loga ' +
+      '`wallet.reconciliation_divergence` em `WARN`.',
+  })
+  @ApiOkResponse({ description: 'Resultado da reconciliação' })
+  @ApiResponse({ status: 400, description: 'UUID inválido' })
+  @ApiResponse({ status: 404, description: 'Wallet não encontrada' })
   async reconcile(@Param('walletId') walletId: string) {
     if (!UUID_RE.test(walletId)) {
       throw new BadRequestException({

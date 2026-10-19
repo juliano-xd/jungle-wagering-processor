@@ -10,6 +10,15 @@ import {
   Post,
   Res,
 } from '@nestjs/common';
+import {
+  ApiBody,
+  ApiHeader,
+  ApiOkResponse,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 import type { Response } from 'express';
 import { WageringService } from '../../application/services/wagering.service.js';
 import type { SubmitTransactionBody } from '../../application/dtos/submit-transaction.dto.js';
@@ -18,16 +27,114 @@ import {
   WagerTransactionKind,
   WagerTransactionStatus,
 } from '../../domain/entities/wager-transaction.js';
-import { payloadHashOf } from '../../domain/services/canonical-json.js';
+import { computeSubmitPayloadHash } from '../../application/services/payload-hash.js';
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+@ApiTags('wagering')
 @Controller('wagering/transactions')
 export class WageringController {
   constructor(private readonly service: WageringService) {}
 
   @Post()
+  @ApiOperation({
+    summary: 'Submete uma transação de apostas',
+    description:
+      'Idempotência via header `Idempotency-Key`. Mesma key + mesmo `payloadHash` → replay; ' +
+      'mesma key + payload diferente → 409. Transações `REFUND`/`ROLLBACK` sem referência ' +
+      'viram `PENDING_REFERENCE` (202) e são reprocessadas por worker.',
+  })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: true,
+    description:
+      'Formato recomendado: `{providerId}:{externalTransactionId}`. ' +
+      'Fonte da verdade para idempotência.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: [
+        'providerId',
+        'externalTransactionId',
+        'playerId',
+        'walletId',
+        'roundId',
+        'gameId',
+        'kind',
+        'money',
+      ],
+      properties: {
+        providerId: { type: 'string', example: 'prov-1' },
+        externalTransactionId: { type: 'string', example: 'tx-123' },
+        playerId: { type: 'string', format: 'uuid' },
+        walletId: { type: 'string', format: 'uuid' },
+        roundId: { type: 'string', example: 'round-987' },
+        gameId: { type: 'string', example: 'fortune-chimp' },
+        kind: {
+          type: 'string',
+          enum: ['BET', 'WIN', 'LOSS', 'REFUND', 'ROLLBACK'],
+          example: 'BET',
+        },
+        money: {
+          type: 'object',
+          required: ['amount', 'currency'],
+          properties: {
+            amount: { type: 'string', example: '25.00' },
+            currency: { type: 'string', example: 'BRL' },
+          },
+        },
+        referenceExternalTransactionId: {
+          type: 'string',
+          description: 'Obrigatório para REFUND e ROLLBACK',
+          example: 'original-bet-id',
+        },
+      },
+    },
+  })
+  @ApiOkResponse({
+    description: 'Transação PROCESSED',
+    schema: {
+      example: {
+        transactionId: '0192f298-345e-7e38-af88-e43f851a819d',
+        status: 'PROCESSED',
+        balance: { amount: '975.00', currency: 'BRL' },
+        walletVersion: 2,
+        idempotentReplay: false,
+      },
+    },
+  })
+  @ApiResponse({
+    status: 202,
+    description: 'PENDING_REFERENCE — aguardando referência',
+    schema: {
+      example: {
+        transactionId: '0192...',
+        status: 'PENDING_REFERENCE',
+        balance: { amount: '100.00', currency: 'BRL' },
+        walletVersion: 1,
+        idempotentReplay: false,
+      },
+    },
+  })
+  @ApiResponse({
+    status: 422,
+    description: 'Rejeição por regra de negócio',
+    schema: {
+      example: {
+        transactionId: '0192...',
+        status: 'REJECTED',
+        balance: { amount: '10.00', currency: 'BRL' },
+        walletVersion: 1,
+        idempotentReplay: false,
+        failureCode: 'INSUFFICIENT_FUNDS',
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Payload inválido ou Idempotency-Key ausente' })
+  @ApiResponse({ status: 404, description: 'Wallet não encontrada' })
+  @ApiResponse({ status: 409, description: 'Conflito de idempotência' })
   async submit(
     @Body() body: SubmitTransactionBody,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
@@ -44,7 +151,7 @@ export class WageringController {
 
     validateSubmitBody(body);
 
-    const hash = payloadHashOf({
+    const hash = computeSubmitPayloadHash({
       providerId: body.providerId,
       externalTransactionId: body.externalTransactionId,
       playerId: body.playerId,
@@ -53,8 +160,7 @@ export class WageringController {
       gameId: body.gameId,
       kind: body.kind,
       money: body.money,
-      referenceExternalTransactionId:
-        body.referenceExternalTransactionId ?? null,
+      referenceExternalTransactionId: body.referenceExternalTransactionId,
     });
 
     const result = await this.service.submitTransaction({
@@ -96,6 +202,10 @@ export class WageringController {
   }
 
   @Get(':transactionId')
+  @ApiOperation({ summary: 'Consulta uma transação por ID interno' })
+  @ApiOkResponse({ description: 'Transação encontrada' })
+  @ApiResponse({ status: 400, description: 'UUID inválido' })
+  @ApiResponse({ status: 404, description: 'Transação não encontrada' })
   async getById(@Param('transactionId') transactionId: string) {
     if (!UUID_RE.test(transactionId)) {
       throw new BadRequestException({
@@ -186,7 +296,6 @@ function validateSubmitBody(
     }
   }
 
-  // UUIDs: playerId, walletId (e transactionId no path do GET).
   if (!UUID_RE.test(body.playerId)) {
     throw new BadRequestException({
       error: 'INVALID_BODY',

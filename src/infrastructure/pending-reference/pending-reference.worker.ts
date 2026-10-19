@@ -155,7 +155,7 @@ export class PendingReferenceWorker
             JSON.stringify({
               event: 'pending_reference.retry',
               instanceId: this.instanceId,
-              txId: id,
+              transactionId: id,
               outcome,
             }),
           );
