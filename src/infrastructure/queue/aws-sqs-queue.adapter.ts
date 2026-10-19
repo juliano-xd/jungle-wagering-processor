@@ -8,16 +8,17 @@ import {
 /**
  * AWS SQS adapter (LocalStack/MiniStack/AWS real).
  *
- * Usa `@aws-sdk/client-sqs` via **import dinâmico** — se o pacote não estiver
- * instalado, só falha quando `QUEUE_BACKEND=aws`. App roda normalmente com
- * in-memory sem instalar nada.
+ * ⚠️ Init é assíncrono (`await import('@aws-sdk/client-sqs')`). Como o
+ * construtor não pode ser async, guardamos a promise em `initPromise` e
+ * `await` em `ready()`. Sem isso, `send`/`receive` disparados logo após
+ * `new AwsSqsQueueAdapter(...)` lançariam "init in progress or failed".
  *
- * Sobre DLQ: quando `SQS_DLQ_URL` está configurado, usamos envio explícito
- * (mais previsível que RedrivePolicy nativa). Também aceita RedrivePolicy
- * nativa — funciona em ambos os casos.
+ * DLQ: se `SQS_DLQ_URL` estiver configurado, usamos envio explícito (mais
+ * previsível que RedrivePolicy nativa). Ambos funcionam — RedrivePolicy só
+ * funciona se a fila for criada com ela; envio explícito funciona sempre.
  *
- * Sobre FIFO: `MessageGroupId` derivado do tipo de evento; `MessageDeduplicationId`
- * derivado do ID da outbox. Redelivery idêntica é absorvida pelo inbox do consumer.
+ * FIFO: `MessageGroupId` derivado do tipo de evento; `MessageDeduplicationId`
+ * derivado do ID da outbox. Redelivery idêntica é absorvida pelo inbox.
  */
 export class AwsSqsQueueAdapter implements QueueConsumerPort, QueuePublisherPort {
   private readonly logger = new Logger(AwsSqsQueueAdapter.name);
@@ -25,6 +26,7 @@ export class AwsSqsQueueAdapter implements QueueConsumerPort, QueuePublisherPort
   // Tipos `any` para não exigir o pacote em compile-time.
   private client: any;
   private sqsMod: any;
+  private readonly initPromise: Promise<void>;
 
   private readonly queueUrl: string;
   private readonly dlqUrl?: string;
@@ -43,8 +45,8 @@ export class AwsSqsQueueAdapter implements QueueConsumerPort, QueuePublisherPort
     this.sqsMod = null;
     this.client = null;
 
-    // Lazy init — o primeiro `send`/`receiveBatch` carrega o SDK.
-    void this.init(config);
+    // Guarda a promise — `ready()` faz `await` antes de qualquer chamada.
+    this.initPromise = this.init(config);
   }
 
   private async init(config: {
@@ -55,10 +57,9 @@ export class AwsSqsQueueAdapter implements QueueConsumerPort, QueuePublisherPort
     accessKeyId?: string;
     secretAccessKey?: string;
   }): Promise<void> {
-    if (this.client) return;
     try {
       this.sqsMod = await import('@aws-sdk/client-sqs');
-    } catch {
+    } catch (err) {
       throw new Error(
         "QUEUE_BACKEND=aws requires '@aws-sdk/client-sqs' installed. " +
           'Run: bun add @aws-sdk/client-sqs',
@@ -78,8 +79,9 @@ export class AwsSqsQueueAdapter implements QueueConsumerPort, QueuePublisherPort
   }
 
   private async ready(): Promise<void> {
+    await this.initPromise;
     if (!this.client) {
-      throw new Error('AwsSqsQueueAdapter: init in progress or failed');
+      throw new Error('AwsSqsQueueAdapter: initialization failed');
     }
   }
 
@@ -101,7 +103,7 @@ export class AwsSqsQueueAdapter implements QueueConsumerPort, QueuePublisherPort
     const res = await this.client.send(
       new ReceiveMessageCommand({
         QueueUrl: this.queueUrl,
-        MaxNumberOfMessages: Math.min(maxMessages, 10), // SQS cap = 10
+        MaxNumberOfMessages: Math.min(maxMessages, 10),
         WaitTimeSeconds: waitTimeSeconds,
         AttributeNames: ['ApproximateReceiveCount'],
       }),
@@ -134,9 +136,6 @@ export class AwsSqsQueueAdapter implements QueueConsumerPort, QueuePublisherPort
         VisibilityTimeout: retryAfterSeconds,
       }),
     );
-    // Nota: se SQS estiver configurado com RedrivePolicy (maxReceiveCount) e
-    // esta for a enésima entrega, o SQS move para DLQ automaticamente. O método
-    // `moveToDlq` abaixo é para DLQ explícita (mais determinística).
   }
 
   async moveToDlq(message: QueueMessage, reason: string): Promise<void> {

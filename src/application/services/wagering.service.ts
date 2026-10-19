@@ -1,4 +1,4 @@
-import { Injectable, Optional } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { EntityManager, LockMode } from '@mikro-orm/core';
 import { Wallet } from '../../domain/entities/wallet.js';
 import { WalletLedgerEntry, LedgerDirection } from '../../domain/entities/wallet-ledger-entry.js';
@@ -41,6 +41,8 @@ import { MetricsService } from '../../infrastructure/observability/metrics.servi
  */
 @Injectable()
 export class WageringService {
+  private readonly logger = new Logger(WageringService.name);
+
   constructor(
     private readonly em: EntityManager,
     @Optional() private readonly metrics?: MetricsService,
@@ -352,6 +354,15 @@ export class WageringService {
           throw err;
         }
       });
+    } catch (err) {
+      // PostgreSQL: 40001 (serialization_failure) / 40P01 (deadlock_detected).
+      // Estes podem ocorrer quando 2+ transações disputam o lock da wallet.
+      // Contabiliza em métrica e propaga (cliente/worker deve retry).
+      const code = (err as { code?: string })?.code;
+      if (code === '40001' || code === '40P01') {
+        this.metrics?.lockConflict();
+      }
+      throw err;
     } finally {
       this.metrics?.observeSubmit((Date.now() - start) / 1000);
     }
@@ -553,6 +564,22 @@ export class WageringService {
     const stored = wallet.balance;
     const consistent = stored.equals(calculated);
     const difference = consistent ? Money.zero(wallet.currency) : stored.subtract(calculated);
+    if (!consistent) {
+      // Spec 9: divergência é logada + contabilizada em métrica + sinalizada
+      // na resposta. NUNCA corrigida silenciosamente.
+      this.metrics?.reconciliationDiverge();
+      this.logger.warn(
+        JSON.stringify({
+          event: 'wallet.reconciliation_divergence',
+          walletId: wallet.id,
+          stored: stored.toJSON(),
+          calculated: calculated.toJSON(),
+          difference: difference.toJSON(),
+          checkedEntries: entries.length,
+        }),
+      );
+    }
+
     return {
       walletId: wallet.id,
       storedBalance: stored,

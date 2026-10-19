@@ -101,7 +101,7 @@ export class WagerTransactionConsumer
           await this.processOne(msg);
         }
       } catch (err) {
-        this.logger.error(
+        this.logger.warn(
           JSON.stringify({
             event: 'wager_consumer.loop_error',
             instanceId: this.instanceId,
@@ -134,7 +134,7 @@ export class WagerTransactionConsumer
         throw new Error('invalid envelope shape');
       }
     } catch (err) {
-      this.logger.error(
+      this.logger.warn(
         JSON.stringify({
           event: 'wager_consumer.invalid_envelope',
           messageId: msg.messageId,
@@ -149,7 +149,7 @@ export class WagerTransactionConsumer
 
     const validKinds = Object.values(WagerTransactionKind) as string[];
     if (!validKinds.includes(envelope.data.kind)) {
-      this.logger.error(
+      this.logger.warn(
         JSON.stringify({
           event: 'wager_consumer.invalid_kind',
           messageId: msg.messageId,
@@ -161,7 +161,7 @@ export class WagerTransactionConsumer
       return;
     }
     if (envelope.data.kind === WagerTransactionKind.Opening) {
-      this.logger.error(
+      this.logger.warn(
         JSON.stringify({
           event: 'wager_consumer.opening_rejected',
           messageId: msg.messageId,

@@ -1,4 +1,16 @@
-version: '3.8'
+# Docker Compose para desenvolvimento local isolado.
+#
+# Uso:
+#   docker compose up -d
+#   DB_PORT=5433 bun run migration:up    # Postgres no host:5433
+#   QUEUE_BACKEND=aws SQS_ENDPOINT=http://localhost:4566 \
+#     SQS_QUEUE_URL=http://localhost:4566/000000000000/wager-transactions.fifo \
+#     SQS_DLQ_URL=http://localhost:4566/000000000000/wager-transactions-dlq.fifo \
+#     bun run start:dev
+#
+# Portas no host (evitando conflito com Postgres do sistema):
+#   - Postgres:   5433  (5432 é reservado para o Postgres local do dev)
+#   - LocalStack: 4566
 
 services:
   postgres:
@@ -9,7 +21,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: wagering_db
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -17,6 +29,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks: [jungle_net]
 
   localstack:
     image: localstack/localstack:3.8
@@ -27,6 +40,25 @@ services:
       - SERVICES=sqs
       - AWS_DEFAULT_REGION=us-east-1
       - DOCKER_HOST=unix:///var/run/docker.sock
+      - PERSISTENCE=1
+    volumes:
+      - localstack_data:/var/lib/localstack
+      # Init script roda automaticamente ao subir (ready.d).
+      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init-queues.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "awslocal sqs list-queues > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [jungle_net]
 
 volumes:
   postgres_data:
+  localstack_data:
+
+networks:
+  jungle_net:
+    driver: bridge

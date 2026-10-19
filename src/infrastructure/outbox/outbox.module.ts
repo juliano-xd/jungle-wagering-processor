@@ -1,20 +1,29 @@
 import { Module } from '@nestjs/common';
-import {
-  OUTBOX_PUBLISHER,
-} from './outbox-publisher.port.js';
+import { OUTBOX_PUBLISHER } from './outbox-publisher.port.js';
 import { OutboxPublisherWorker } from './outbox-publisher.worker.js';
 import { ConsoleOutboxPublisher } from './console-outbox-publisher.js';
+import { QueueOutboxPublisher } from './queue-outbox-publisher.js';
+import { QueueModule } from '../queue/queue.module.js';
 
-/**
- * Registra o worker do outbox + publisher default (console).
- *
- * Para plugar SQS:
- *   providers: [{ provide: OUTBOX_PUBLISHER, useClass: SqsOutboxPublisher }]
- */
 @Module({
+  imports: [QueueModule],
   providers: [
     OutboxPublisherWorker,
-    { provide: OUTBOX_PUBLISHER, useClass: ConsoleOutboxPublisher },
+    ConsoleOutboxPublisher,
+    QueueOutboxPublisher,
+    {
+      provide: OUTBOX_PUBLISHER,
+      inject: [ConsoleOutboxPublisher, QueueOutboxPublisher],
+      useFactory: (
+        console_: ConsoleOutboxPublisher,
+        queue_: QueueOutboxPublisher,
+      ) => {
+        const backend = (
+          process.env.OUTBOX_PUBLISHER_BACKEND ?? 'console'
+        ).toLowerCase();
+        return backend === 'queue' ? queue_ : console_;
+      },
+    },
   ],
   exports: [OutboxPublisherWorker],
 })

@@ -26,7 +26,10 @@
     "test:all": "NODE_ENV=test bun test --max-concurrency=1",
     "test:watch": "NODE_ENV=test bun test --watch test/unit",
     "test:coverage": "NODE_ENV=test bun test --coverage test/",
-    "test:e2e:shell": "./scripts/test-out-of-order.sh && ./scripts/test-queue.sh"
+    "test:e2e:shell": "./scripts/test-out-of-order.sh && ./scripts/test-queue.sh",
+    "test:sqs": "docker compose up -d --wait localstack postgres && bun test test/integration/aws/sqs-real.integration.spec.ts",
+    "test:load": "bun run test/load/load-test.ts",
+    "test:full": "bun run db:reset-test && bun run test && bun run test:sqs && bun run test:load"
   },
   "devDependencies": {
     "@mikro-orm/cli": "^7.0.2",
@@ -37,6 +40,7 @@
     "@types/bun": "latest",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.0",
+    "@types/pg": "^8.23.1",
     "@types/supertest": "^6.0.2",
     "supertest": "^7.0.0",
     "typescript": "~5.9.3"

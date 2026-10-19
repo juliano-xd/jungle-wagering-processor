@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Global, Module } from '@nestjs/common';
 import {
   QUEUE_CONSUMER,
   QUEUE_PUBLISHER,
@@ -17,6 +17,7 @@ import { WageringService } from '../../application/services/wagering.service.js'
  * O `MetricsService` (de `MetricsModule`, `@Global`) é injetado
  * automaticamente nos providers que declaram `@Optional() metrics?`.
  */
+@Global()
 @Module({
   controllers: [DevQueueController],
   providers: [
@@ -34,7 +35,11 @@ import { WageringService } from '../../application/services/wagering.service.js'
       useFactory: (inMemory: InMemoryQueueAdapter) => buildQueue(inMemory),
     },
   ],
-  exports: [WagerTransactionConsumer],
+  exports: [
+      WagerTransactionConsumer,
+      QUEUE_PUBLISHER,
+      QUEUE_CONSUMER,
+    ],
 })
 export class QueueModule {}
 

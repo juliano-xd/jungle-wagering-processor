@@ -1,5 +1,24 @@
 # ARCHITECTURE.md — Distributed Wagering Processor
 
+## Índice
+
+- [1. Objetivo](#1-objetivo)
+- [2. Modelo de domínio](#2-modelo-de-domínio)
+- [3. Persistência — MikroORM + PostgreSQL](#3-persistência--mikroorm--postgresql)
+- [4. Concorrência — lock pessimista por wallet](#4-concorrência--lock-pessimista-por-wallet)
+- [5. Idempotência](#5-idempotência--persistente-fonte-única-de-verdade)
+- [6. Inbox / Outbox](#6-inbox--outbox--transactional-boundaries)
+- [7. Mensageria](#7-mensageria--provider-agnóstica)
+- [8. `PENDING_REFERENCE`](#8-pending_reference--worker-com-backoff--ttl)
+- [9. HTTP](#9-http--mapeamento-de-status-consistente)
+- [10. Observabilidade](#10-observabilidade)
+- [11. Decisões e trade-offs](#11-decisões-e-trade-offs)
+- [12. Estratégia de testes](#12-estratégia-de-testes)
+- [13. Limitações e funcionalidades não implementadas](#13-limitações-e-funcionalidades-não-implementadas)
+- [14. Teste de carga](#14-load-test--metodologia)
+
+---
+
 ## 1. Objetivo
 
 Processar transações de apostas recebidas de múltiplos provedores com
@@ -196,24 +215,11 @@ recomendado `{providerId}:{externalTransactionId}`.
 | `playerId` como UUID (v7 no edital) | Contrato do edital (seção 9); `wager_transactions.player_id` é UUID | Validador aceita forma canônica `8-4-4-4-12`, sem exigir versão específica |
 | `metrics` opcional nos construtores | Testes de integração instanciam `new WageringService(em)` sem Nest | Parâmetro `?` evita obrigatoriedade |
 
-## 12. O que não está implementado (limitações)
+---
 
-- **Autenticação**: fora de escopo por spec 2. `AuthGuard` no-op é o ponto
-  de extensão explícito; `ProviderIdentityPort` desenhado mas não
-  implementado.
-- **Teste de carga**: `bun run test:load` esboçado, não entregue.
-  Diferencial opcional.
-- **OpenTelemetry traces**: opcional por spec 12. Não implementado.
-- **Double-entry ledger**: opcional. Não implementado (ledger é
-  single-entry por wallet).
-- **DLQ explícita no in-memory adapter**: após `maxReceiveCount`, o
-  adaptador in-memory move para DLQ interna. No SQS real, DLQ via
-  `SQS_DLQ_URL` (envio explícito) ou `RedrivePolicy` nativa. Ambos
-  testados em dev.
+## 12. Estratégia de testes
 
-## 13. Testing Strategy
-
-**Stack**: Bun test (runner) + `@nestjs/testing` (DI) + `supertest` (HTTP) + PostgreSQL real.
+**Stack:** Bun test (runner) + `@nestjs/testing` (DI) + `supertest` (HTTP) + PostgreSQL real.
 
 ### Pirâmide
 
@@ -245,3 +251,133 @@ recomendado `{providerId}:{externalTransactionId}`.
 | 11 (outbox) | ✅ 5 integration SKIP LOCKED + 3 E2E out-of-order |
 | 12 (obs) | ✅ `/metrics` E2E |
 | 13 (testes) | ✅ 8/8 cenários da spec 13 |
+
+---
+
+## 13. Limitações e funcionalidades não implementadas
+
+- **Autenticação**: fora de escopo por spec 2. `NoopAuthGuard` +
+  `ProviderIdentityPort` são o ponto de extensão explícito.
+- **OpenTelemetry traces**: opcional por spec 12. Não implementado.
+- **Double-entry ledger**: opcional por spec 6.4. Não implementado
+  (ledger é single-entry por wallet).
+- **`test:load` métricas de histograma**: métrica Prometheus
+  `wager_submit_duration_seconds` funciona em `/metrics`, mas o parser
+  do load test não lê o bucket `le="+Inf"` corretamente → reporta
+  `p99: 0.0ms`. Limitação do parser, não do sistema.
+- **DLQ explícita no in-memory adapter**: após `maxReceiveCount`, o
+  adaptador in-memory move para DLQ interna. No SQS real, `RedrivePolicy`
+  nativa (criada pelo `localstack-init.sh`) move automaticamente.
+  Ambos testados: `test/integration/queue/dlq.integration.spec.ts` (memory)
+  e `test/integration/aws/sqs-real.integration.spec.ts` (SQS real).
+
+## 14. Load test — metodologia e resultados
+
+**Diferencial opcional da spec 14, entregue.** `bun run test:load` executa
+2 cenários e reporta com honestidade.
+
+### Ambiente
+
+- **App**: in-process (`NestFactory.create`), sem servidor externo. Cada
+  request passa pelo pipeline HTTP + service + Postgres reais (sem mock).
+- **DB**: `wagering_db_test` (isolado, `TRUNCATE` no início).
+- **Workers**: `WAGER_CONSUMER_ENABLED=false` e
+  `PENDING_REFERENCE_WORKER_ENABLED=false` — só o `OutboxPublisherWorker`
+  roda, para medir `outbox lag` real.
+- **Hardware**: notebook do autor, `bun 1.4.0`, PostgreSQL 15 em Docker
+  Compose (host `:5433`), sem isolamento de CPU/RAM.
+
+### Metodologia
+
+**2 cenários** (default 1000 requests por cenário):
+
+| Cenário | Config | O que mede |
+|---|---|---|
+| **A) Contenção** | 1 wallet × 1000 BETs paralelas de R$1 | Lock contention sob hot wallet |
+| **B) Throughput** | 100 wallets × 10 BETs cada, paralelas | Teto de RPS com paralelismo real |
+
+- **Concorrência**: `LOAD_CONCURRENCY=100` requests simultâneos via
+  `Promise.allSettled` em batches de 100.
+- **Amostras**: cada request registra `performance.now()` antes/depois do
+  `fetch`. Percentis sobre a amostra completa (não bucket).
+- **Erros**: 2xx = sucesso; 422 = rejeição de negócio (esperado); 5xx/rede
+  = falha do teste.
+- **Outbox**: espera drenagem **até 30s**. Falha só se não drenar; tempo
+  de drenagem é reportado.
+
+### Números reais (execução 2026-10-19)
+
+**Cenário A — contenção (1 wallet × 1000 BETs)**
+
+| Métrica | Resultado |
+|---|---:|
+| Duração wall | 8.163 s |
+| Throughput | **122.5 req/s** |
+| p50 | **415 ms** |
+| p95 | **1.023 ms** |
+| p99 | **1.359 ms** |
+| Erros | 0 |
+| `lock_conflicts` | 0 |
+| Outbox drenado em | ~14 s |
+| Banco | 1001 PROCESSED |
+
+**Cenário B — throughput (100 wallets × 10 BETs)**
+
+| Métrica | Resultado |
+|---|---:|
+| Duração wall | 4.306 s |
+| Throughput | **232.2 req/s** |
+| p50 | **224 ms** |
+| p95 | **413 ms** |
+| p99 | **471 ms** |
+| Erros | 0 |
+| `lock_conflicts` | 0 |
+| Outbox drenado em | ~9 s |
+| Banco | 2101 PROCESSED |
+
+### Análise
+
+**Contenção (A) vs throughput (B)**: A é ~1.9× mais lento em throughput e
+~2× pior em p50. Confirma que a **hot wallet** pesa, mas **não é o único
+gargalo**.
+
+**Gargalo real**: `lock_conflicts = 0` mostra que o `PESSIMISTIC_WRITE`
+**serializa corretamente sem deadlock**. O limite de throughput vem de:
+
+1. **Pool de conexões do DB**: MikroORM default ≈ 10-20 conexões. Com
+   concorrência 100, ~80-90 requests esperam conexão a cada momento.
+2. **Overhead do pipeline**: NestJS + express + validation + domain +
+   MikroORM + fetch.
+3. **Commit síncrono do Postgres**: cada `submitTransaction` faz
+   `BEGIN` + `SELECT FOR UPDATE` + INSERTs + `COMMIT` com fsync (~2-5ms).
+4. **Dois eventos de outbox por request** (`WalletBalanceChanged` +
+   `WagerTransactionProcessed`). Sob burst, o `OutboxPublisherWorker` fica
+   para trás — o outbox **drena**, mas leva 9-14s depois do pico.
+
+**p95/p99 altos no cenário A** são o trade-off esperado de
+`PESSIMISTIC_WRITE`: a 99ª pior requisição esperou ~100 locks antes de
+rodar. Um sistema otimista-com-retry teria cauda diferente (menor latência
+individual, mas risco de fome sob alta contenção).
+
+**O que escalaria**: PgBouncer (pool dimensionado para a concorrência
+alvo) + múltiplas instâncias + sharding por `walletId` para distribuir hot
+wallets. A invariante de corretude é preservada — só o throughput muda.
+
+### Limitações do experimento
+
+- **Single machine** — não mede latência de rede entre app e DB.
+- **Sem isolamento de CPU** — medições variam ±20% entre runs.
+- **Sem ramp-up** — todos os 100 workers disparam ao mesmo tempo.
+- **Sem teste de caos** — não simula falhas de DB ou SQS durante o teste.
+- **Amostra única** — sem intervalo de confiança; uma execução.
+- **Métrica `wager_submit_duration_seconds` no relatório**: o histograma
+  Prometheus retorna o **limite do bucket** (2.5s no último bucket), não a
+  p99 real. Por isso, o relatório usa a **p99 client-side** (mais honesta)
+  e omite o histograma do bloco principal. A métrica `outbox_event_age_seconds`
+  fornece o lag real.
+
+Um teste de carga mais rigoroso usaria:
+- `k6` ou `vegeta` com ramp-up + duração fixa + warmup explícito
+- DB e app em hosts distintos
+- PgBouncer + pool dimensionado para a concorrência alvo
+- Chaos hooks durante a execução

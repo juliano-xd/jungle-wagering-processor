@@ -13,17 +13,12 @@ import {
  *   - duplicatas / replays detectados
  *   - retries (outbox, pending-ref, fila)
  *   - DLQ
- *   - conflitos de lock
+ *   - conflitos de lock (PostgreSQL 40001/40P01)
+ *   - divergência de reconciliação (spec 9)
  *   - outbox lag
  *   - latência de processamento
  *
- * Nomes seguem a convenção Prometheus (`*_total` para counters,
- * `*_seconds` para histogramas de tempo, `*_count`/`*_pending` para gauges).
- *
- * O MetricsService é registrado em `MetricsModule` como `@Global`, então
- * qualquer provider pode injetá-lo sem importar o módulo. Nos testes de
- * integração, os services são instanciados manualmente (`new WageringService(em)`)
- * — o parâmetro `metrics` é opcional lá para não quebrar os testes.
+ * `@Global()` em `MetricsModule` — qualquer provider pode injetar sem importar.
  */
 @Injectable()
 export class MetricsService {
@@ -33,7 +28,7 @@ export class MetricsService {
   readonly transactionsTotal = new Counter({
     name: 'wager_transactions_total',
     help: 'Wager transactions by terminal status',
-    labelNames: ['status'] as const, // PROCESSED | REJECTED | PENDING_REFERENCE
+    labelNames: ['status'] as const,
     registers: [this.registry],
   });
 
@@ -60,7 +55,14 @@ export class MetricsService {
   // ------- concorrência -------
   readonly lockConflicts = new Counter({
     name: 'wager_lock_conflicts_total',
-    help: 'PESSIMISTIC_WRITE lock contention (serialization failure)',
+    help: 'PostgreSQL serialization_failure (40001) / deadlock_detected (40P01)',
+    registers: [this.registry],
+  });
+
+  // ------- reconciliação (spec 9) -------
+  readonly reconciliationDivergence = new Counter({
+    name: 'wallet_reconciliation_divergence_total',
+    help: 'Wallet reconciliations with stored != calculated balance',
     registers: [this.registry],
   });
 
@@ -94,7 +96,7 @@ export class MetricsService {
   readonly pendingReferenceOutcome = new Counter({
     name: 'pending_reference_outcome_total',
     help: 'PENDING_REFERENCE retry outcomes',
-    labelNames: ['outcome'] as const, // processed | pending | rejected | skipped
+    labelNames: ['outcome'] as const,
     registers: [this.registry],
   });
 
@@ -108,7 +110,7 @@ export class MetricsService {
   readonly queueAcked = new Counter({
     name: 'queue_messages_acked_total',
     help: 'Messages acked (success or terminal)',
-    labelNames: ['reason'] as const, // processed | domain_error | invalid_envelope | invalid_kind
+    labelNames: ['reason'] as const,
     registers: [this.registry],
   });
 
@@ -133,7 +135,6 @@ export class MetricsService {
   });
 
   constructor() {
-    // Métricas de processo (memória, event loop, GC) com prefixo `nodejs_`.
     collectDefaultMetrics({ register: this.registry, prefix: 'nodejs_' });
   }
 
@@ -163,6 +164,10 @@ export class MetricsService {
     this.lockConflicts.inc();
   }
 
+  reconciliationDiverge(): void {
+    this.reconciliationDivergence.inc();
+  }
+
   outboxSuccess(count: number): void {
     this.outboxPublished.inc(count);
   }
@@ -179,7 +184,9 @@ export class MetricsService {
     this.outboxEventAge.observe(seconds);
   }
 
-  pendingReference(outcome: 'processed' | 'pending' | 'rejected' | 'skipped'): void {
+  pendingReference(
+    outcome: 'processed' | 'pending' | 'rejected' | 'skipped',
+  ): void {
     this.pendingReferenceOutcome.inc({ outcome });
   }
 
