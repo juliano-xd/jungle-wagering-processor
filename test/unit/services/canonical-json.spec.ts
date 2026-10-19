@@ -2,7 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import {
   canonicalJson,
   payloadHashOf,
-} from '../../src/domain/services/canonical-json.js';
+} from '../../../src/domain/services/canonical-json.js';
 
 describe('canonicalJson', () => {
   it('ordena chaves recursivamente', () => {
