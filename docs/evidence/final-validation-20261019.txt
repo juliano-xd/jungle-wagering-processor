@@ -1,0 +1,217 @@
+
+╔══════════════════════════════════════════════════════════════════════╗
+║  Comprehensive Test v5 — Distributed Wagering Processor              ║
+║  Valida README.md + ARCHITECTURE.md                                  ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  ℹ APP_URL  = http://localhost:3000
+  ℹ DB       = postgres@127.0.0.1:5432/wagering_db
+  ℹ Log      = /tmp/wagering-test-results.log
+  ℹ Flags    = IDEMPOTENCY_CONCURRENCY=20 RUN_LOAD_TEST=1 RUN_PENDING_TEST=1 SKIP_TEST_SUITE=0
+
+═══════════════════════════════════════════════════════════════════════
+  1. PRÉ-REQUISITOS (README)
+═══════════════════════════════════════════════════════════════════════
+  ℹ bun 1.4.0
+✓ PASS: Bun >= 1.4 (1.4.0)
+  ℹ node 22.23.2
+✓ PASS: Node >= 20.19 ou 22.12 (22.23.2)
+✓ PASS: PostgreSQL acessível via docker exec jungle_postgres
+  ℹ PostgreSQL major=15
+✓ PASS: PostgreSQL >= 15 (15)
+✓ PASS: LocalStack rodando (SQS disponível)
+
+═══════════════════════════════════════════════════════════════════════
+  2. MIGRATIONS E db:verify
+═══════════════════════════════════════════════════════════════════════
+✓ PASS: bun run mikro-orm migration:up
+✓ PASS: bun run db:verify
+
+═══════════════════════════════════════════════════════════════════════
+  3. INVARIANTES DE SCHEMA (ARCHITECTURE §3)
+═══════════════════════════════════════════════════════════════════════
+✓ PASS: wallets.balance_amount é NUMERIC(18,2) (esperado=18,2, obtido=18,2)
+✓ PASS: wager_transactions.money_amount é NUMERIC(18,2)
+✓ PASS: CHECK (balance_amount >= 0) em wallets
+✓ PASS: UNIQUE(player_id, currency) em wallets
+✓ PASS: UNIQUE(provider_id, external_transaction_id)
+✓ PASS: Trigger(es) em wallet_ledger_entries
+✓ PASS: Função wallet_ledger_immutable_fn existe
+✓ PASS: Índice parcial uq_wager_tx_reversal existe
+  ℹ   CREATE UNIQUE INDEX uq_wager_tx_reversal ON public.wager_transactions USING btree (provider_id, reference_external_transaction_id, kind) WHERE (((status)::text = 'PROCESSED'::text) AND (reference_external_transaction_id IS NOT NULL))
+✓ PASS: Colunas pending_reference_* em wager_transactions (esperado=2, obtido=2)
+✓ PASS: idx_wager_tx_pending_reference existe
+
+═══════════════════════════════════════════════════════════════════════
+  4. SUÍTE DE TESTES (README — 88 / 47 / 27 / 162)
+═══════════════════════════════════════════════════════════════════════
+✓ PASS: bun run test (rc=0, 27s)
+  ℹ Blocos:
+  ℹ   Ran 88 tests across 11 files. [262.00ms]
+  ℹ   Ran 47 tests across 10 files. [19.14s]
+  ℹ   Ran 27 tests across 3 files. [6.70s]
+  ℹ Total somado: pass=162 fail=0 ran=162 (docs: 162)
+✓ PASS: Soma de testes executados = 162 (esperado=162, obtido=162)
+✓ PASS: Total de PASS = 162 (esperado=162, obtido=162)
+✓ PASS: Total de FAIL = 0 (esperado=0, obtido=0)
+  ℹ Unit esperado 88: Ran 88 tests
+  ℹ Integration esperado 47: Ran 47 tests
+  ℹ E2E esperado 27: Ran 27 tests
+
+═══════════════════════════════════════════════════════════════════════
+  5. SUBIR A APP (se necessário)
+═══════════════════════════════════════════════════════════════════════
+  ℹ Subindo app em background...
+✓ PASS: App subiu em http://localhost:3000 (pid=968419)
+
+═══════════════════════════════════════════════════════════════════════
+  6. HEALTH (README — /health/live, /health/ready)
+═══════════════════════════════════════════════════════════════════════
+✓ PASS: GET /health/live → 200 (esperado=200, obtido=200)
+✓ PASS: GET /health/ready → 200 (esperado=200, obtido=200)
+
+═══════════════════════════════════════════════════════════════════════
+  7. POST /wallets (README — 201 Created)
+═══════════════════════════════════════════════════════════════════════
+✓ PASS: POST /wallets → 201 (esperado=201, obtido=201)
+✓ PASS: wallet.id retornado (4e1c476c-b972-4b69-962a-9a629caf4f99)
+✓ PASS: balance.amount = 100.00 (esperado=100.00, obtido=100.00)
+✓ PASS: balance.currency = BRL (esperado=BRL, obtido=BRL)
+✓ PASS: version = 1 (esperado=1, obtido=1)
+✓ PASS: balance.amount é string (sem float)
+
+═══════════════════════════════════════════════════════════════════════
+  8. POST /wagering/transactions — status 200/202/400/404/409/422
+═══════════════════════════════════════════════════════════════════════
+✓ PASS: BET válido → 200 (esperado=200, obtido=200)
+✓ PASS:   status=PROCESSED (esperado=PROCESSED, obtido=PROCESSED)
+  ℹ   balanceAfter=90.00
+✓ PASS: POST sem Idempotency-Key → 400 (esperado=400, obtido=400)
+✓ PASS: UUID inválido → 400 (esperado=400, obtido=400)
+✓ PASS: Wallet inexistente → 404 (esperado=404, obtido=404)
+✓ PASS: 1ª chamada (key nova) → 200 (esperado=200, obtido=200)
+✓ PASS: Mesma key + payload diferente → 409 (esperado=409, obtido=409)
+✓ PASS: Saldo insuficiente → 422 (esperado=422, obtido=422)
+✓ PASS:   failureCode=INSUFFICIENT_FUNDS (esperado=INSUFFICIENT_FUNDS, obtido=INSUFFICIENT_FUNDS)
+✓ PASS:   status=REJECTED (esperado=REJECTED, obtido=REJECTED)
+✓ PASS: ROLLBACK c/ ref ausente → 202 (esperado=202, obtido=202)
+✓ PASS:   status=PENDING_REFERENCE (esperado=PENDING_REFERENCE, obtido=PENDING_REFERENCE)
+
+═══════════════════════════════════════════════════════════════════════
+  9. IDEMPOTÊNCIA (ARCHITECTURE §5 — replay fiel)
+═══════════════════════════════════════════════════════════════════════
+✓ PASS: 1ª chamada → 200 (esperado=200, obtido=200)
+✓ PASS: 2ª chamada (replay) → 200 (esperado=200, obtido=200)
+✓ PASS: Replay retorna mesmo transactionId (esperado=3afddbd1-a0fa-4a9c-9ee4-c70298b7be06, obtido=3afddbd1-a0fa-4a9c-9ee4-c70298b7be06)
+✓ PASS: Replay retorna mesmo balanceAfter (esperado=90.00, obtido=90.00)
+  ℹ Disparando 20 requisições paralelas com a mesma key (IDEMPOTENCY_CONCURRENCY=20)
+✓ PASS: Loop 20× terminou (todas as requisições responderam)
+✓ PASS: Mesma key 20× → ledger tem 2 entries (OPENING+DEBIT) (esperado=2, obtido=2)
+✓ PASS:   Saldo final = 99.00 (esperado=99.00, obtido=99.00)
+
+═══════════════════════════════════════════════════════════════════════
+  10. CONCORRÊNCIA — 2 BETs paralelas de 80.00 em saldo 100.00
+═══════════════════════════════════════════════════════════════════════
+✓ PASS: 2 BETs concorrentes terminaram dentro de 30s
+  ℹ   status A=200  status B=422
+✓ PASS: 1 PROCESSED + 1 REJECTED (esperado=1ok/1rej, obtido=1ok/1rej)
+✓ PASS:   Saldo final = 20.00 (esperado=20.00, obtido=20.00)
+  ℹ Teste de 3 forks × 50 reqs: coberto por bun run test:integration
+
+═══════════════════════════════════════════════════════════════════════
+  11. LEDGER IMUTÁVEL (ARCHITECTURE §3)
+═══════════════════════════════════════════════════════════════════════
+✓ PASS: UPDATE em wallet_ledger_entries bloqueado pelo trigger
+  ℹ   msg: ERROR:  Ledger entries are immutable and cannot be updated or deleted
+✓ PASS: DELETE em wallet_ledger_entries bloqueado pelo trigger
+  ℹ   msg: ERROR:  Ledger entries are immutable and cannot be updated or deleted
+
+═══════════════════════════════════════════════════════════════════════
+  12. ENDPOINTS GET documentados
+═══════════════════════════════════════════════════════════════════════
+✓ PASS: GET /wallets/:id → 200 (esperado=200, obtido=200)
+✓ PASS: GET /wallets/:id/ledger → 200 (esperado=200, obtido=200)
+✓ PASS: Ledger retorna estrutura com cursor
+✓ PASS: GET /wagering/transactions/:id → 200 (esperado=200, obtido=200)
+✓ PASS: GET /providers/:p/wagering/transactions/:ext → 200 (esperado=200, obtido=200)
+✓ PASS: POST /wallets/:id/reconciliation → 201
+
+═══════════════════════════════════════════════════════════════════════
+  13. OBSERVABILIDADE — /metrics (ARCHITECTURE §10)
+═══════════════════════════════════════════════════════════════════════
+✓ PASS: GET /metrics → 200 (esperado=200, obtido=200)
+✓ PASS: Métrica presente: wager_transactions_total
+✓ PASS: Métrica presente: wager_submit_duration_seconds
+✓ PASS: Métrica presente: wager_idempotency_replays_total
+✓ PASS: Métrica presente: wager_idempotency_conflicts_total
+✓ PASS: Métrica presente: wager_lock_conflicts_total
+✓ PASS: Métrica presente: outbox_published_total
+✓ PASS: Métrica presente: outbox_publish_failed_total
+✓ PASS: Métrica presente: outbox_pending
+✓ PASS: Métrica presente: outbox_event_age_seconds
+✓ PASS: Métrica presente: pending_reference_outcome_total
+✓ PASS: Métrica presente: queue_messages_received_total
+✓ PASS: Métrica presente: queue_messages_acked_total
+✓ PASS: Métrica presente: queue_messages_nacked_total
+✓ PASS: Métrica presente: queue_messages_dlq_total
+✓ PASS: Métrica presente: http_errors_total
+✓ PASS: Métrica presente: nodejs_process_cpu_user_seconds_total
+
+═══════════════════════════════════════════════════════════════════════
+  14. OUTBOX — drenagem
+═══════════════════════════════════════════════════════════════════════
+  ℹ outbox_pending inicial = 0
+✓ PASS: Outbox drenada (published_at preenchido) (esperado=0, obtido=0)
+
+═══════════════════════════════════════════════════════════════════════
+  15. PENDING_REFERENCE — resolução (RUN_PENDING_TEST=1)
+═══════════════════════════════════════════════════════════════════════
+✓ PASS: WIN válido → 200 (esperado=200, obtido=200)
+  ℹ Saldo após WIN: 130.00
+✓ PASS: ROLLBACK com ref existente → 200 (esperado=200, obtido=200)
+✓ PASS: Saldo final após ROLLBACK = 100.00 (esperado=100.00, obtido=100.00)
+
+═══════════════════════════════════════════════════════════════════════
+  16. SQS / LocalStack (README — wager-transactions.fifo)
+═══════════════════════════════════════════════════════════════════════
+  ℹ Container localstack: jungle_localstack
+✓ PASS: Fila wager-transactions.fifo existe
+✓ PASS: Fila wager-transactions-dlq.fifo existe
+✓ PASS: RedrivePolicy configurada (maxReceiveCount)
+✓ PASS:   maxReceiveCount=5 (esperado=5, obtido=5)
+✓ PASS: bun run test:sqs
+
+═══════════════════════════════════════════════════════════════════════
+  17. LOAD TEST (RUN_LOAD_TEST=1)
+═══════════════════════════════════════════════════════════════════════
+✓ PASS: bun run test:load
+      latência p50        : 1007.1ms
+      latência p95        : 2074.2ms
+      latência p99        : 2871.4ms
+      outbox publicados   : 2002 (deltas)
+      outbox drenado em   : 24486ms
+      outbox pending (fim): 0
+      outbox event age p99: 100ms (via histograma)
+      banco: PROCESSED=1001 REJECTED=0
+      latência p50        : 713.1ms
+      latência p95        : 1273.6ms
+      latência p99        : 1402.8ms
+      outbox publicados   : 2200 (deltas)
+      outbox drenado em   : 19970ms
+      outbox pending (fim): 0
+      outbox event age p99: 500ms (via histograma)
+      banco: PROCESSED=2101 REJECTED=0
+
+═══════════════════════════════════════════════════════════════════════
+  RESUMO
+═══════════════════════════════════════════════════════════════════════
+PASS: 87
+FAIL: 0
+WARN: 0
+SKIP: 0
+
+PASS=87 FAIL=0 WARN=0 SKIP=0
+
+Log completo: /tmp/wagering-test-results.log
+✅ Nenhum FAIL — todas as checagens passaram ou foram skipadas por ambiente
+  ℹ Parando app iniciada pelo script (pid=968419)
