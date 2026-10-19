@@ -211,21 +211,37 @@ recomendado `{providerId}:{externalTransactionId}`.
   `SQS_DLQ_URL` (envio explícito) ou `RedrivePolicy` nativa. Ambos
   testados em dev.
 
-## 13. Como testar
+## 13. Testing Strategy
 
-```bash
-# Schema invariantes (trigger, NUMERIC, uniques)
-bun run db:verify
+**Stack**: Bun test (runner) + `@nestjs/testing` (DI) + `supertest` (HTTP) + PostgreSQL real.
 
-# Integração — PostgreSQL real (todos os eliminatórios)
-bun test test/integration/concurrency/race-condition.integration.spec.ts
+### Pirâmide
 
-# E2E — cenário 13.7 (mensagem fora de ordem)
-./scripts/test-out-of-order.sh
+| Nível | Comando | Tempo | Quantidade |
+|---|---|---|---|
+| **Unit** | `bun run test:unit` | ~150ms | 85 testes |
+| **Integration** | `bun run test:integration` | ~7s | 44 testes |
+| **E2E** | `bun run test:e2e` | ~2s | 25 testes |
+| **Total** | `bun run test` | ~10s | **154 testes** |
 
-# E2E — consumer de fila (in-memory)
-DEV_QUEUE_ENDPOINT=true bun run start:dev
-./scripts/test-queue.sh
+### Decisões
 
-# Métricas
-curl -s http://localhost:3000/metrics | grep -E '^(wager_|outbox_|queue_|pending_reference_)'
+- **Unit puro**: sem DB, sem Nest. Roda em <200ms — feedback instantâneo para TDD.
+- **Integration com PostgreSQL real**: **sem mocks**. `TRUNCATE CASCADE` no `beforeEach`.
+- **E2E in-memory**: `Test.createTestingModule` + `supertest`. Sobe o `AppModule` completo, sem `start:dev`.
+- **Serialização**: `--max-concurrency=1` obrigatório em integration/E2E (DB compartilhado, `TRUNCATE` colide em paralelo).
+- **Bun test**: runner nativo, Jest-compatible. Compatível com `@nestjs/testing@12` (runner-agnostic).
+
+### Cobertura por spec do edital
+
+| Spec | Cobertura |
+|---|---|
+| 5 (invioláveis) | ✅ 12 testes de schema + concorrência |
+| 6 (domínio) | ✅ 85 unit tests |
+| 7 (regras) | ✅ 11 integration + 5 E2E |
+| 8 (concorrência) | ✅ 16 testes (50x paralelo, N wallets, 3 forks, crash) |
+| 9 (HTTP) | ✅ 16 E2E HTTP (200/201/202/400/404/409/422) |
+| 10 (SQS) | ✅ 4 integration SQS + 4 E2E consumer |
+| 11 (outbox) | ✅ 5 integration SKIP LOCKED + 3 E2E out-of-order |
+| 12 (obs) | ✅ `/metrics` E2E |
+| 13 (testes) | ✅ 8/8 cenários da spec 13 |
