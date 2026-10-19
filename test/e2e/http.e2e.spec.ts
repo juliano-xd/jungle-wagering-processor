@@ -5,7 +5,25 @@ import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { MikroORM } from '@mikro-orm/core';
 import { AppModule } from '../../src/app.module.js';
+import { WageringService } from '../../src/application/services/wagering.service.js';
+import { WageringController } from '../../src/infrastructure/http/wagering.controller.js';
 
+/**
+ * E2E da camada HTTP (spec 9) com a stack oficial do NestJS 12.
+ *
+ * ⚠️ `em` injetado por `app.get(EntityManager)` é o **root EM** do MikroORM.
+ * Chamar `em.clear()`, `em.flush()`, `em.find()` direto nele viola o contrato
+ * de contexto (`allowGlobalContext` é desligado por padrão). Apenas
+ * `em.getConnection().execute(...)` funciona.
+ *
+ * Para TRUNCATE e setup de estado, use:
+ *   - `em.getConnection().execute(sql)` — funciona no root
+ *   - `em.fork()` — retorna um EM novo com contexto próprio
+ *
+ * `WageringService` usa `em.transactional()` / `em.fork()` internamente, então
+ * o estado dos testes não vaza pelo identity map do root. Por isso o
+ * `beforeEach` só precisa truncar tabelas — não precisa `clear()`.
+ */
 describe('HTTP API — mapeamento de status consistente (spec 9)', () => {
   let app: INestApplication;
   let httpServer: unknown;
@@ -37,10 +55,15 @@ describe('HTTP API — mapeamento de status consistente (spec 9)', () => {
     );
   });
 
+  // ---------------------------------------------------------------- helpers
+
   async function createWallet(playerId = crypto.randomUUID()) {
     const res = await request(httpServer)
       .post('/wallets')
-      .send({ playerId, initialBalance: { amount: '100.00', currency: 'BRL' } })
+      .send({
+        playerId,
+        initialBalance: { amount: '100.00', currency: 'BRL' },
+      })
       .expect(201);
     return { playerId, walletId: res.body.id as string };
   }
@@ -67,24 +90,33 @@ describe('HTTP API — mapeamento de status consistente (spec 9)', () => {
       .send(dto);
   }
 
-  // ---------------- wallet ----------------
+  // ---------------------------------------------------------------- wallet
 
-  it('POST /wallets → 201', async () => {
+  it('POST /wallets → 201 Created', async () => {
     const playerId = crypto.randomUUID();
     const res = await request(httpServer)
       .post('/wallets')
-      .send({ playerId, initialBalance: { amount: '100.00', currency: 'BRL' } })
+      .send({
+        playerId,
+        initialBalance: { amount: '100.00', currency: 'BRL' },
+      })
       .expect(201);
+
     expect(res.body.playerId).toBe(playerId);
     expect(res.body.balance).toEqual({ amount: '100.00', currency: 'BRL' });
     expect(res.body.version).toBe(1);
+    expect(typeof res.body.id).toBe('string');
   });
 
   it('POST /wallets playerId inválido → 400', async () => {
     const res = await request(httpServer)
       .post('/wallets')
-      .send({ playerId: 'not-a-uuid', initialBalance: { amount: '100.00', currency: 'BRL' } })
+      .send({
+        playerId: 'not-a-uuid',
+        initialBalance: { amount: '100.00', currency: 'BRL' },
+      })
       .expect(400);
+
     expect(res.body.error).toBe('INVALID_BODY');
   });
 
@@ -92,17 +124,22 @@ describe('HTTP API — mapeamento de status consistente (spec 9)', () => {
     const { playerId } = await createWallet();
     const res = await request(httpServer)
       .post('/wallets')
-      .send({ playerId, initialBalance: { amount: '50.00', currency: 'BRL' } })
+      .send({
+        playerId,
+        initialBalance: { amount: '50.00', currency: 'BRL' },
+      })
       .expect(409);
+
     expect(res.body.error).toBe('DUPLICATE_IDEMPOTENCY_KEY');
   });
 
-  // ---------------- wagering ----------------
+  // ---------------------------------------------------------------- wagering
 
   it('POST /wagering/transactions válido → 200 PROCESSED', async () => {
     const { playerId, walletId } = await createWallet();
     const dto = makeBetDto(walletId, playerId);
     const res = await submitTransaction(dto).expect(200);
+
     expect(res.body.status).toBe('PROCESSED');
     expect(res.body.balance).toEqual({ amount: '70.00', currency: 'BRL' });
     expect(res.body.idempotentReplay).toBe(false);
@@ -124,6 +161,7 @@ describe('HTTP API — mapeamento de status consistente (spec 9)', () => {
       referenceExternalTransactionId: `win-never-${crypto.randomUUID()}`,
     };
     const res = await submitTransaction(dto).expect(202);
+
     expect(res.body.status).toBe('PENDING_REFERENCE');
     expect(res.body.balance).toEqual({ amount: '100.00', currency: 'BRL' });
   });
@@ -132,6 +170,7 @@ describe('HTTP API — mapeamento de status consistente (spec 9)', () => {
     const { playerId, walletId } = await createWallet();
     const dto = makeBetDto(walletId, playerId, '500.00');
     const res = await submitTransaction(dto).expect(422);
+
     expect(res.body.status).toBe('REJECTED');
     expect(res.body.failureCode).toBe('INSUFFICIENT_FUNDS');
   });
@@ -143,6 +182,7 @@ describe('HTTP API — mapeamento de status consistente (spec 9)', () => {
       .post('/wagering/transactions')
       .send(dto)
       .expect(400);
+
     expect(res.body.error).toBe('MISSING_IDEMPOTENCY_KEY');
   });
 
@@ -152,6 +192,7 @@ describe('HTTP API — mapeamento de status consistente (spec 9)', () => {
       .set('Idempotency-Key', 'whatever')
       .send({ kind: 'BET' })
       .expect(400);
+
     expect(res.body.error).toBe('INVALID_BODY');
   });
 
@@ -164,38 +205,50 @@ describe('HTTP API — mapeamento de status consistente (spec 9)', () => {
   it('POST /wagering/transactions conflito de idempotência → 409', async () => {
     const { playerId, walletId } = await createWallet();
     const dto = makeBetDto(walletId, playerId);
+
     await submitTransaction(dto).expect(200);
+
     const conflicting = { ...dto, money: { amount: '99.99', currency: 'BRL' } };
     const res = await submitTransaction(conflicting).expect(409);
     expect(res.body.error).toBe('DUPLICATE_IDEMPOTENCY_KEY');
   });
 
-  // ---------------- queries ----------------
+  // ---------------------------------------------------------------- queries
 
   it('GET /wallets/:id → 200', async () => {
     const { walletId, playerId } = await createWallet();
-    const res = await request(httpServer).get(`/wallets/${walletId}`).expect(200);
+    const res = await request(httpServer)
+      .get(`/wallets/${walletId}`)
+      .expect(200);
+
     expect(res.body.playerId).toBe(playerId);
     expect(res.body.balance).toEqual({ amount: '100.00', currency: 'BRL' });
   });
 
   it('GET /wallets/:id inexistente → 404', async () => {
-    const res = await request(httpServer).get(`/wallets/${crypto.randomUUID()}`).expect(404);
+    const res = await request(httpServer)
+      .get(`/wallets/${crypto.randomUUID()}`)
+      .expect(404);
+
     expect(res.body.error).toBe('WALLET_NOT_FOUND');
   });
 
   it('GET /wallets/:id UUID inválido → 400', async () => {
-    const res = await request(httpServer).get('/wallets/not-a-uuid').expect(400);
+    const res = await request(httpServer)
+      .get('/wallets/not-a-uuid')
+      .expect(400);
+
     expect(res.body.error).toBe('INVALID_PARAM');
   });
 
-  // ---------------- ops ----------------
+  // ---------------------------------------------------------------- ops
 
-  it('GET /metrics → 200 text/plain', async () => {
+  it('GET /metrics → 200 text/plain Prometheus', async () => {
     const res = await request(httpServer)
       .get('/metrics')
       .expect(200)
       .expect('Content-Type', /text\/plain/);
+
     expect(typeof res.text).toBe('string');
     expect(res.text).toContain('# HELP');
   });
@@ -203,10 +256,50 @@ describe('HTTP API — mapeamento de status consistente (spec 9)', () => {
   it('GET /health/live → 200', async () => {
     const res = await request(httpServer).get('/health/live').expect(200);
     expect(res.body.status).toBe('ok');
+    expect(res.body.check).toBe('live');
   });
 
   it('GET /health/ready → 200', async () => {
     const res = await request(httpServer).get('/health/ready').expect(200);
     expect(res.body.checks.postgres).toBe('ok');
+  });
+
+  // ---------------------------------------------------------------- §9: 503 transiente
+
+  it('POST /wagering/transactions — erro transitório → 503 com retryable:true', async () => {
+    const { playerId, walletId } = await createWallet();
+    const dto = makeBetDto(walletId, playerId);
+
+    // ⚠️ `WageringService` é registrado em `providers` de 4 módulos diferentes
+    // (HttpModule, QueueModule, OutboxModule, PendingReferenceModule). Cada um
+    // instancia sua PRÓPRIA cópia (NestJS não deduplica providers de módulos
+    // diferentes). Portanto `app.get(WageringService)` retorna uma instância
+    // arbitrária (a do app root ou a primeira resolvida), que NÃO é a mesma
+    // usada pelo `WageringController`. Mockar `app.get()` não afeta o controller.
+    //
+    // Fix: pegar a instância exata que o controller usa via `controller['service']`.
+    // É `private readonly` no TypeScript, mas em runtime JS é uma propriedade
+    // normal e acessível. Não afeta produção; só o teste.
+    const controller = app.get(WageringController);
+    const wageringService = (controller as unknown as { service: WageringService }).service;
+    const original = wageringService.submitTransaction.bind(wageringService);
+
+    (wageringService as any).submitTransaction = async () => {
+      const { WagerTransactionError, FailureCode } = await import(
+        '../../src/domain/errors/wager-transaction.error.js'
+      );
+      throw new WagerTransactionError(
+        'simulated transient infra',
+        FailureCode.InfraTransient,
+      );
+    };
+
+    try {
+      const res = await submitTransaction(dto).expect(503);
+      expect(res.body.error).toBe('INFRA_TRANSIENT');
+      expect(res.body.retryable).toBe(true);
+    } finally {
+      (wageringService as any).submitTransaction = original;
+    }
   });
 });

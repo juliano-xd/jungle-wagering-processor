@@ -192,6 +192,38 @@ describe('E2E — queue consumer + inbox dedup', () => {
     expect(stats.queued).toBe(0);
     expect(stats.dlq).toBe(0);
   });
+
+  it('OPENING via fila → ack + log (viola spec 6.3)', async () => {
+    const queue = new InMemoryQueueAdapter();
+    const consumer = new WagerTransactionConsumer(service, queue);
+
+    const messageId = `msg-opening-${crypto.randomUUID()}`;
+    const envelope: WagerTransactionRequestedEnvelope = {
+      messageId,
+      type: 'WagerTransactionRequested',
+      occurredAt: new Date().toISOString(),
+      data: {
+        providerId: 'prov-1',
+        externalTransactionId: `opening-ext-${crypto.randomUUID()}`,
+        idempotencyKey: `prov-1:opening-${crypto.randomUUID()}`,
+        playerId: crypto.randomUUID(),
+        walletId: crypto.randomUUID(),
+        roundId: 'round-opening',
+        gameId: 'slot-1',
+        kind: 'OPENING',
+        money: { amount: '100.00', currency: 'BRL' },
+      },
+    };
+
+    await queue.send(JSON.stringify(envelope));
+    const batch = await queue.receiveBatch(1, 0);
+    await consumer.processOne(batch[0]);
+
+    // OPENING é interno (spec 6.3) → consumer faz ack + log, sem processar
+    const stats = queue.stats();
+    expect(stats.queued).toBe(0);  // ack
+    expect(stats.dlq).toBe(0);     // não é falha transitória, não vai pra DLQ
+  });
 });
 
 // ---------------------------------------------------------------------------
