@@ -16,7 +16,7 @@ Serviço financeiro distribuído para processamento de transações de apostas m
 - [API HTTP](#api-http)
 - [Processamento assíncrono](#processamento-assíncrono)
 - [Testes](#testes)
-- [Mensageria real com SQS](#mensageria-real-com-sqs-e-localstack)
+- [Mensageria real com SQS](#mensageria-real-sqs--localstack)
 - [Teste de carga](#teste-de-carga)
 - [Decisões de design](#decisões-de-design)
 - [Limitações](#limitações)
@@ -48,6 +48,8 @@ HTTP POST /wagering/transactions       SQS: wager-transactions.fifo
                                 ▼
                     OutboxPublisherWorker → fila
 ```
+
+Principais garantias:
 
 - **Idempotência:** `IdempotencyRecord` persistido e `payloadHash` canônico.
 - **Concorrência:** lock `PESSIMISTIC_WRITE` por wallet.
@@ -85,6 +87,7 @@ docker exec jungle_localstack awslocal sqs list-queues
 
 # 3. Criar a configuração local
 cp .env.example .env
+
 # Configure, conforme necessário:
 # DB_PORT=5433
 # QUEUE_BACKEND=aws
@@ -114,6 +117,7 @@ Opção mais rápida para desenvolvimento. Requer PostgreSQL acessível em `127.
 ```bash
 # 1. Criar a configuração local
 cp .env.example .env
+
 # Defaults esperados:
 # DB_PORT=5432
 # QUEUE_BACKEND=memory
@@ -165,7 +169,9 @@ bun run start:dev
 
 ## Variáveis de ambiente
 
-Todas as variáveis estão documentadas em [`.env.example`](.env.example). Principais configurações:
+Todas as variáveis estão documentadas em [`.env.example`](.env.example).
+
+Principais configurações:
 
 | Variável | Padrão | Descrição |
 |---|---|---|
@@ -241,7 +247,7 @@ Idempotency-Key: prov-1:tx-123
 }
 ```
 
-**Códigos de resposta**
+### Códigos de resposta
 
 | HTTP | Significado |
 |---|---|
@@ -277,7 +283,9 @@ Exemplo de corpo de rejeição:
 
 **Chave de idempotência recomendada:** `"{providerId}:{externalTransactionId}"`.
 
-O `payloadHash` é um SHA-256 do JSON canônico dos campos de negócio, sem headers ou metadados. Implementação: [`src/domain/services/canonical-json.ts`](src/domain/services/canonical-json.ts).
+O `payloadHash` é um SHA-256 do JSON canônico dos campos de negócio, sem headers ou metadados.
+
+Implementação: [`src/domain/services/canonical-json.ts`](src/domain/services/canonical-json.ts).
 
 ---
 
@@ -330,11 +338,12 @@ Quando `OUTBOX_PUBLISHER_BACKEND=queue`, os eventos são publicados na fila conf
 
 ## Testes
 
-| Nível | Runner | Tempo aproximado | Cobertura |
-|---|---|---:|---|
-| Unit | `bun test` | < 300 ms | Domínio puro, sem banco de dados |
-| Integration | `bun test` | ~10 s | PostgreSQL real e workers |
-| E2E | `bun test` | ~6 s | HTTP in-memory e fila |
+| Nível | Runner | Tempo aproximado | Quantidade | Cobertura |
+|---|---|---|---|---|
+| Unit | `bun test` | < 300 ms | **88 testes** | Domínio puro, sem banco de dados |
+| Integration | `bun test` | ~10 s | **47 testes** | PostgreSQL real e workers |
+| E2E | `bun test` | ~6 s | **27 testes** | HTTP in-memory e fila |
+| **Total** | `bun run test` | Varia por ambiente | **162 testes** | Suíte completa |
 
 Execução completa:
 
@@ -342,7 +351,7 @@ Execução completa:
 bun run test
 ```
 
-O README original registra aproximadamente **154 testes e zero falhas**. O resultado real pode variar conforme o estado atual do código.
+A suíte documentada contém **162 testes**: 88 unitários, 47 de integração e 27 E2E. Os tempos são aproximados e podem variar conforme o ambiente.
 
 ### Isolamento e concorrência
 
@@ -358,6 +367,38 @@ O README original registra aproximadamente **154 testes e zero falhas**. O resul
 - Publicação de evento somente após commit: teste de rollback.
 - Multi-instância: três processos simultâneos.
 - Ausência de débito duplicado: 50 requisições resultam em um débito; redelivery reproduz o resultado anterior.
+
+### Validação da documentação
+
+O script `scripts/comprehensive-test.sh` valida que as afirmações de `README.md` e `ARCHITECTURE.md` continuam verdadeiras após qualquer mudança.
+
+Ele executa 88+ checagens contra o estado real do código, banco e API — não contra a documentação.
+
+```bash
+# Execução padrão (~2 min)
+./scripts/comprehensive-test.sh
+
+# Com todos os cenários opcionais (load test + PENDING_REFERENCE) (~5 min)
+RUN_LOAD_TEST=1 RUN_PENDING_TEST=1 ./scripts/comprehensive-test.sh
+```
+
+O que ele valida:
+
+- **§1–2:** pré-requisitos, `migration:up` e `db:verify`.
+- **§3:** invariantes de schema (`NUMERIC(18,2)`, `CHECK`, `UNIQUE`, trigger e índice parcial).
+- **§4:** contagem de testes (88/47/27 = **162**).
+- **§5–8:** HTTP: health, criação de wallet e todos os status (`200`, `202`, `400`, `404`, `409`, `422`).
+- **§9:** idempotência: replay fiel + 20 requisições paralelas = 1 débito.
+- **§10:** concorrência: 2 BETs de 80 em saldo 100 → 1 `PROCESSED` + 1 `REJECTED`.
+- **§11:** ledger imutável: trigger bloqueia `UPDATE`/`DELETE`.
+- **§12:** endpoints GET + `reconciliation`.
+- **§13:** 16 métricas Prometheus.
+- **§14:** drenagem da outbox.
+- **§15:** `PENDING_REFERENCE` (opcional, `RUN_PENDING_TEST=1`).
+- **§16:** SQS LocalStack + `maxReceiveCount=5`.
+- **§17:** teste de carga (opcional, `RUN_LOAD_TEST=1`).
+
+**Resultado esperado:** `PASS=87+`, `FAIL=0`, `WARN=0`.
 
 ---
 
@@ -398,7 +439,9 @@ bun run start:dev
 bun run test:sqs
 ```
 
-O teste `sqs-real.integration.spec.ts` é executado quando o LocalStack está disponível e, caso contrário, é ignorado automaticamente. Ele cobre:
+O teste `sqs-real.integration.spec.ts` é executado quando o LocalStack está disponível e, caso contrário, é ignorado automaticamente.
+
+Ele cobre:
 
 - Criação de fila FIFO e `RedrivePolicy`.
 - Fluxo completo de envio, recebimento e confirmação (`send → receive → ack`).
@@ -409,7 +452,7 @@ O teste `sqs-real.integration.spec.ts` é executado quando o LocalStack está di
 
 ## Teste de carga
 
-O teste de carga é opcional. A metodologia completa está descrita na seção 14 de [`ARCHITECTURE.md`](ARCHITECTURE.md).
+O teste de carga é opcional, está **entregue e já foi executado**. A metodologia, os resultados reais e a análise estão descritos na seção 14 de [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ```bash
 # Padrão: 100 concorrentes e 1.000 requisições por cenário
@@ -455,22 +498,12 @@ Consulte [`ARCHITECTURE.md`](ARCHITECTURE.md) para a justificativa completa.
 
 ## Limitações
 
-- **Autenticação:** não implementada por decisão de escopo (spec 2). Ponto
-  de extensão em `src/application/ports/provider-identity.port.ts` +
-  `NoopAuthGuard` (registrado como `APP_GUARD` em `HttpModule`).
+- **Autenticação:** não implementada por decisão de escopo (spec 2). Ponto de extensão em `src/application/ports/provider-identity.port.ts` + `NoopAuthGuard` (registrado como `APP_GUARD` em `HttpModule`).
 - **Traces OpenTelemetry:** não implementados; opcionais por spec 12.
-- **Teste de carga:** `bun run test:load` **está entregue** e foi executado.
-  Metodologia + números reais + análise estão em [`ARCHITECTURE.md`](ARCHITECTURE.md)
-  seção 14. Não há meta de RPS — o experimento é reportado com honestidade.
-- **Ledger double-entry:** não implementado; ledger é single-entry por wallet
-  (spec 6.4 diz "diferencial opcional").
-- **`schema:update` do MikroORM:** não deve ser usado neste projeto.
-  Triggers e índices parciais não são modelados pelo ORM e poderiam ser
-  removidos silenciosamente. Migrations são a única fonte de verdade.
-- **Métrica `wager_submit_duration_seconds` p99 no load test:** o parser
-  do histograma Prometheus tem dificuldade com buckets `le="+Inf"`.
-  Métrica funciona em `/metrics`, mas o `test:load` reporta `p99: 0.0ms`
-  (limitação conhecida do parser, não do sistema).
+- **Teste de carga:** `bun run test:load` **está entregue** e foi executado. Metodologia, números reais e análise estão em [`ARCHITECTURE.md`](ARCHITECTURE.md), seção 14. Não há meta de RPS — o experimento é reportado com honestidade.
+- **Ledger double-entry:** não implementado; ledger é single-entry por wallet (spec 6.4 diz "diferencial opcional").
+- **`schema:update` do MikroORM:** não deve ser usado neste projeto. Triggers e índices parciais não são modelados pelo ORM e poderiam ser removidos silenciosamente. Migrations são a única fonte de verdade.
+- **Métrica `wager_submit_duration_seconds` p99 no load test:** o parser do histograma Prometheus tem dificuldade com buckets `le="+Inf"`. A métrica funciona em `/metrics`, mas o `test:load` reporta `p99: 0.0ms` (limitação conhecida do parser, não do sistema).
 
 ---
 
