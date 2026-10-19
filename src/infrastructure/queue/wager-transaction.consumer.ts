@@ -23,7 +23,7 @@ const CONSUMER_NAME = 'wager-tx-consumer';
 /**
  * Consumer de `wager-transactions.fifo` (spec seção 10).
  *
- * Fluxo por mensagem:
+ * Fluxo por mensagem (ver `processOne`):
  *   1. Parse do envelope — inválido → ack + log (retry não ajuda).
  *   2. `submitTransaction` com `inboxMessage` — dedup via inbox persistente,
  *      lock pessimista, wallet+ledger+idempotency+inbox+outbox na mesma tx SQL.
@@ -33,8 +33,8 @@ const CONSUMER_NAME = 'wager-tx-consumer';
  *   5. Outros erros (DB down, timeout) → **nack** com backoff. DLQ após
  *      `SQS_MAX_RECEIVE_COUNT` entregas.
  *
- * Garantias: at-least-once, idempotente (inbox + IdempotencyRecord),
- * ack SOMENTE após commit, graceful shutdown em SIGTERM.
+ * `processOne` é público para permitir que os testes E2E dirijam o
+ * processamento de forma determinística, sem depender de timers.
  */
 @Injectable()
 export class WagerTransactionConsumer
@@ -98,7 +98,7 @@ export class WagerTransactionConsumer
         }
         for (const msg of messages) {
           if (this.stopped) break;
-          await this.handleOne(msg);
+          await this.processOne(msg);
         }
       } catch (err) {
         this.logger.error(
@@ -115,7 +115,13 @@ export class WagerTransactionConsumer
     }
   }
 
-  private async handleOne(msg: QueueMessage): Promise<void> {
+  /**
+   * Processa uma mensagem já recebida da fila. Idempotente, safe para chamar
+   * N vezes sobre a mesma `messageId` (dedup via inbox persistente).
+   *
+   * Público para permitir testes determinísticos sem depender do loop.
+   */
+  async processOne(msg: QueueMessage): Promise<void> {
     let envelope: WagerTransactionRequestedEnvelope;
     try {
       envelope = JSON.parse(msg.body) as WagerTransactionRequestedEnvelope;
@@ -227,9 +233,6 @@ export class WagerTransactionConsumer
   }
 }
 
-/**
- * Hash canônico do envelope. Mesmo conjunto de campos do controller HTTP.
- */
 function payloadHashForEnvelope(env: WagerTransactionRequestedEnvelope): string {
   return payloadHashOf({
     providerId: env.data.providerId,

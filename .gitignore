@@ -32,3 +32,20 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Finder (MacOS) folder config
 .DS_Store
+
+# ---- Build artifacts ----
+mikro-orm.config.js
+mikro-orm.config.js.map
+mikro-orm.config.d.ts
+*.tsbuildinfo
+dist/
+coverage/
+
+# ---- Logs ----
+*.log
+start:dev.txt
+
+# ---- Backups de refactor / cleanup ----
+_backup-specs/
+_backup-cleanup/
+*.legacy-REMOVED
