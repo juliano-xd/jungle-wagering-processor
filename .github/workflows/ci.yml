@@ -32,18 +32,18 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
-      localstack:
-        image: nahuelnucera/ministack:latest
+      ministack:
+        image: ministackorg/ministack:latest
         env:
           SERVICES: sqs
-          EAGER_SERVICE_LOADING: 1
         ports:
           - 4566:4566
         options: >-
-          --health-cmd "curl -sf http://localhost:4566/_localstack/health || exit 1"
+          --health-cmd "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health')\""
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 20
+          --health-retries 10
+          --health-start-period 15s
 
     steps:
       - name: Checkout
