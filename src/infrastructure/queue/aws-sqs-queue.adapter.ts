@@ -5,66 +5,55 @@ import {
   QueuePublisherPort,
 } from './queue.port.js';
 
+interface SqsConfig {
+  endpoint?: string;
+  region: string;
+  queueUrl: string;
+  dlqUrl?: string;
+  accessKeyId?: string;
+  secretAccessKey?: string;
+}
+
 /**
  * AWS SQS adapter (LocalStack/MiniStack/AWS real).
  *
- * ⚠️ Init é assíncrono (`await import('@aws-sdk/client-sqs')`). Como o
- * construtor não pode ser async, guardamos a promise em `initPromise` e
- * `await` em `ready()`. Sem isso, `send`/`receive` disparados logo após
- * `new AwsSqsQueueAdapter(...)` lançariam "init in progress or failed".
+ * Init é assíncrono: o construtor não pode ser `async`, então guardamos a
+ * promise em `initPromise` e fazemos `await` em `ready()` antes de qualquer
+ * operação. Sem isso, `send`/`receive` chamados logo após o `new` falhariam.
  *
- * DLQ: se `SQS_DLQ_URL` estiver configurado, usamos envio explícito (mais
- * previsível que RedrivePolicy nativa). Ambos funcionam — RedrivePolicy só
- * funciona se a fila for criada com ela; envio explícito funciona sempre.
+ * DLQ: com `dlqUrl` configurado, usamos envio explícito — sempre funciona,
+ * independente de a fila ter sido criada com `RedrivePolicy`.
  *
- * FIFO: `MessageGroupId` derivado do tipo de evento; `MessageDeduplicationId`
- * derivado do ID da outbox. Redelivery idêntica é absorvida pelo inbox.
+ * FIFO: `MessageGroupId`/`MessageDeduplicationId` vêm do caller; redelivery
+ * idêntica é absorvida pelo inbox.
  */
 export class AwsSqsQueueAdapter implements QueueConsumerPort, QueuePublisherPort {
   private readonly logger = new Logger(AwsSqsQueueAdapter.name);
 
-  // Tipos `any` para não exigir o pacote em compile-time.
-  private client: any;
-  private sqsMod: any;
+  // Tipos `any` para não exigir `@aws-sdk/client-sqs` em compile-time.
+  private client: any = null;
+  private sqsMod: any = null;
   private readonly initPromise: Promise<void>;
 
   private readonly queueUrl: string;
   private readonly dlqUrl?: string;
-  private readonly maxReceiveCount = Number(process.env.SQS_MAX_RECEIVE_COUNT ?? 5);
 
-  constructor(config: {
-    endpoint?: string;
-    region: string;
-    queueUrl: string;
-    dlqUrl?: string;
-    accessKeyId?: string;
-    secretAccessKey?: string;
-  }) {
+  constructor(config: SqsConfig) {
     this.queueUrl = config.queueUrl;
     this.dlqUrl = config.dlqUrl;
-    this.sqsMod = null;
-    this.client = null;
-
-    // Guarda a promise — `ready()` faz `await` antes de qualquer chamada.
     this.initPromise = this.init(config);
   }
 
-  private async init(config: {
-    endpoint?: string;
-    region: string;
-    queueUrl: string;
-    dlqUrl?: string;
-    accessKeyId?: string;
-    secretAccessKey?: string;
-  }): Promise<void> {
+  private async init(config: SqsConfig): Promise<void> {
     try {
       this.sqsMod = await import('@aws-sdk/client-sqs');
-    } catch (err) {
+    } catch {
       throw new Error(
         "QUEUE_BACKEND=aws requires '@aws-sdk/client-sqs' installed. " +
           'Run: bun add @aws-sdk/client-sqs',
       );
     }
+
     this.client = new this.sqsMod.SQSClient({
       region: config.region,
       endpoint: config.endpoint,
@@ -78,36 +67,34 @@ export class AwsSqsQueueAdapter implements QueueConsumerPort, QueuePublisherPort
     });
   }
 
+  /** Garante que o client foi inicializado. */
   private async ready(): Promise<void> {
     await this.initPromise;
-    if (!this.client) {
-      throw new Error('AwsSqsQueueAdapter: initialization failed');
-    }
+  }
+
+  /** Instancia um comando SQS e o envia após garantir o `ready()`. */
+  private async dispatch(commandName: string, input: Record<string, unknown>): Promise<any> {
+    await this.ready();
+    return this.client.send(new this.sqsMod[commandName](input));
   }
 
   async send(body: string, deduplicationId?: string, messageGroupId?: string): Promise<void> {
-    await this.ready();
-    const { SendMessageCommand } = this.sqsMod;
-    const cmd = new SendMessageCommand({
+    await this.dispatch('SendMessageCommand', {
       QueueUrl: this.queueUrl,
       MessageBody: body,
       ...(deduplicationId ? { MessageDeduplicationId: deduplicationId } : {}),
       ...(messageGroupId ? { MessageGroupId: messageGroupId } : {}),
     });
-    await this.client.send(cmd);
   }
 
   async receiveBatch(maxMessages: number, waitTimeSeconds: number): Promise<QueueMessage[]> {
-    await this.ready();
-    const { ReceiveMessageCommand } = this.sqsMod;
-    const res = await this.client.send(
-      new ReceiveMessageCommand({
-        QueueUrl: this.queueUrl,
-        MaxNumberOfMessages: Math.min(maxMessages, 10),
-        WaitTimeSeconds: waitTimeSeconds,
-        AttributeNames: ['ApproximateReceiveCount'],
-      }),
-    );
+    const res = await this.dispatch('ReceiveMessageCommand', {
+      QueueUrl: this.queueUrl,
+      MaxNumberOfMessages: Math.min(maxMessages, 10),
+      WaitTimeSeconds: waitTimeSeconds,
+      AttributeNames: ['ApproximateReceiveCount'],
+    });
+
     return (res.Messages ?? []).map((m: any) => ({
       messageId: m.MessageId ?? '',
       receiptHandle: m.ReceiptHandle ?? '',
@@ -116,41 +103,29 @@ export class AwsSqsQueueAdapter implements QueueConsumerPort, QueuePublisherPort
   }
 
   async ack(message: QueueMessage): Promise<void> {
-    await this.ready();
-    const { DeleteMessageCommand } = this.sqsMod;
-    await this.client.send(
-      new DeleteMessageCommand({
-        QueueUrl: this.queueUrl,
-        ReceiptHandle: message.receiptHandle,
-      }),
-    );
+    await this.dispatch('DeleteMessageCommand', {
+      QueueUrl: this.queueUrl,
+      ReceiptHandle: message.receiptHandle,
+    });
   }
 
   async nack(message: QueueMessage, retryAfterSeconds: number): Promise<void> {
-    await this.ready();
-    const { ChangeMessageVisibilityCommand } = this.sqsMod;
-    await this.client.send(
-      new ChangeMessageVisibilityCommand({
-        QueueUrl: this.queueUrl,
-        ReceiptHandle: message.receiptHandle,
-        VisibilityTimeout: retryAfterSeconds,
-      }),
-    );
+    await this.dispatch('ChangeMessageVisibilityCommand', {
+      QueueUrl: this.queueUrl,
+      ReceiptHandle: message.receiptHandle,
+      VisibilityTimeout: retryAfterSeconds,
+    });
   }
 
   async moveToDlq(message: QueueMessage, reason: string): Promise<void> {
-    await this.ready();
     if (this.dlqUrl) {
-      const { SendMessageCommand } = this.sqsMod;
-      await this.client.send(
-        new SendMessageCommand({
-          QueueUrl: this.dlqUrl,
-          MessageBody: message.body,
-          MessageAttributes: {
-            reason: { DataType: 'String', StringValue: reason },
-          },
-        }),
-      );
+      await this.dispatch('SendMessageCommand', {
+        QueueUrl: this.dlqUrl,
+        MessageBody: message.body,
+        MessageAttributes: {
+          reason: { DataType: 'String', StringValue: reason },
+        },
+      });
     } else {
       this.logger.error(
         JSON.stringify({
@@ -160,6 +135,7 @@ export class AwsSqsQueueAdapter implements QueueConsumerPort, QueuePublisherPort
         }),
       );
     }
+
     await this.ack(message);
   }
 }

@@ -3,13 +3,12 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
   HttpStatus,
   Inject,
   Injectable,
   Post,
-  Res,
 } from '@nestjs/common';
-import type { Response } from 'express';
 import { QUEUE_PUBLISHER } from './queue.port.js';
 import type { QueuePublisherPort } from './queue.port.js';
 import { InMemoryQueueAdapter } from './in-memory-queue.adapter.js';
@@ -29,24 +28,23 @@ export class DevQueueController {
   ) {}
 
   @Post('publish')
-  async publish(@Body() body: unknown, @Res({ passthrough: true }) res: Response) {
-    if (process.env.DEV_QUEUE_ENDPOINT !== 'true') {
-      throw new BadRequestException({
-        error: 'DEV_ENDPOINT_DISABLED',
-        message: 'Set DEV_QUEUE_ENDPOINT=true to enable this endpoint',
-      });
-    }
+  @HttpCode(HttpStatus.ACCEPTED)
+  async publish(@Body() body: unknown): Promise<{ accepted: true }> {
+    this.assertDevEnabled();
+
     if (!body || typeof body !== 'object') {
       throw new BadRequestException({
         error: 'INVALID_BODY',
         message: 'Envelope JSON required',
       });
     }
+
     const envelope = body as Record<string, unknown>;
     if (
       typeof envelope.messageId !== 'string' ||
       envelope.type !== 'WagerTransactionRequested' ||
-      !envelope.data
+      !envelope.data ||
+      typeof envelope.data !== 'object'
     ) {
       throw new BadRequestException({
         error: 'INVALID_ENVELOPE',
@@ -54,19 +52,23 @@ export class DevQueueController {
           'Envelope must have messageId (string), type="WagerTransactionRequested", data (object)',
       });
     }
+
     await this.publisher.send(JSON.stringify(body));
-    res.status(HttpStatus.ACCEPTED);
     return { accepted: true };
   }
 
   @Get('stats')
-  stats() {
+  stats(): ReturnType<InMemoryQueueAdapter['stats']> {
+    this.assertDevEnabled();
+    return this.inMemory.stats();
+  }
+
+  private assertDevEnabled(): void {
     if (process.env.DEV_QUEUE_ENDPOINT !== 'true') {
       throw new BadRequestException({
         error: 'DEV_ENDPOINT_DISABLED',
         message: 'Set DEV_QUEUE_ENDPOINT=true to enable this endpoint',
       });
     }
-    return this.inMemory.stats();
   }
 }

@@ -6,6 +6,7 @@ import {
   OnApplicationShutdown,
   Optional,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import {
   QUEUE_CONSUMER,
   WagerTransactionRequestedEnvelope,
@@ -18,30 +19,39 @@ import { Money } from '../../domain/value-objects/money.js';
 import { computeSubmitPayloadHash } from '../../application/services/payload-hash.js';
 import { MetricsService } from '../observability/metrics.service.js';
 
+/** Motivos possíveis de ack — casa com `MetricsService.queueAck`. */
+type AckReason = 'processed' | 'domain_error' | 'invalid_envelope' | 'invalid_kind';
+
 const CONSUMER_NAME = 'wager-tx-consumer';
+
+/** `Set` para busca O(1) — o loop é caminho quente. */
+const ALL_KINDS: ReadonlySet<string> = new Set(
+  Object.values(WagerTransactionKind) as string[],
+);
 
 /**
  * Consumer de `wager-transactions.fifo` (spec seção 10).
  *
  * Fluxo por mensagem (ver `processOne`):
- *   1. Parse do envelope — inválido → ack + log (retry não ajuda).
- *   2. `submitTransaction` com `inboxMessage` — dedup via inbox persistente,
- *      lock pessimista, wallet+ledger+idempotency+inbox+outbox na mesma tx SQL.
+ *   1. Decodificação do envelope — inválido → ack + log (retentativa não ajuda).
+ *   2. `submitTransaction` com `inboxMessage` — deduplicação via inbox
+ *      persistente, lock pessimista, wallet+ledger+idempotency+inbox+outbox
+ *      na mesma transação SQL.
  *   3. PROCESSED / PENDING_REFERENCE / REJECTED → **ack**.
  *   4. `WagerTransactionError` → **ack + log** (payload conflitante,
- *      wallet inexistente, moeda divergente — retry não ajuda).
- *   5. Outros erros (DB down, timeout) → **nack** com backoff. DLQ após
- *      `SQS_MAX_RECEIVE_COUNT` entregas.
+ *      wallet inexistente, moeda divergente — retentativa não ajuda).
+ *   5. Outros erros (banco de dados fora do ar, timeout) → **nack** com
+ *      backoff. DLQ após `SQS_MAX_RECEIVE_COUNT` entregas.
  *
  * `processOne` é público para permitir que os testes E2E dirijam o
- * processamento de forma determinística, sem depender de timers.
+ * processamento de forma determinística, sem depender de temporizadores.
  */
 @Injectable()
 export class WagerTransactionConsumer
   implements OnApplicationBootstrap, OnApplicationShutdown
 {
   private readonly logger = new Logger(WagerTransactionConsumer.name);
-  private readonly instanceId = `wager-consumer-${crypto.randomUUID().slice(0, 8)}`;
+  private readonly instanceId = `wager-consumer-${randomUUID().slice(0, 8)}`;
   private running = false;
   private stopped = false;
 
@@ -88,87 +98,27 @@ export class WagerTransactionConsumer
     );
   }
 
-  private async loop(): Promise<void> {
-    while (!this.stopped) {
-      this.running = true;
-      try {
-        const messages = await this.queue.receiveBatch(this.batchSize, this.waitSeconds);
-        if (messages.length > 0) {
-          this.metrics?.queueReceive(messages.length);
-        }
-        for (const msg of messages) {
-          if (this.stopped) break;
-          await this.processOne(msg);
-        }
-      } catch (err) {
-        this.logger.warn(
-          JSON.stringify({
-            event: 'wager_consumer.loop_error',
-            instanceId: this.instanceId,
-            message: err instanceof Error ? err.message : String(err),
-          }),
-        );
-        await new Promise((r) => setTimeout(r, this.pollMs));
-      } finally {
-        this.running = false;
-      }
-    }
-  }
-
   /**
-   * Processa uma mensagem já recebida da fila. Idempotente, safe para chamar
-   * N vezes sobre a mesma `messageId` (dedup via inbox persistente).
+   * Processa uma mensagem já recebida da fila. Idempotente, seguro para
+   * chamar N vezes sobre a mesma `messageId` (deduplicação via inbox
+   * persistente).
    *
    * Público para permitir testes determinísticos sem depender do loop.
    */
   async processOne(msg: QueueMessage): Promise<void> {
-    let envelope: WagerTransactionRequestedEnvelope;
-    try {
-      envelope = JSON.parse(msg.body) as WagerTransactionRequestedEnvelope;
-      if (
-        !envelope ||
-        envelope.type !== 'WagerTransactionRequested' ||
-        !envelope.data ||
-        !envelope.messageId
-      ) {
-        throw new Error('invalid envelope shape');
-      }
-    } catch (err) {
-      this.logger.warn(
-        JSON.stringify({
-          event: 'wager_consumer.invalid_envelope',
-          messageId: msg.messageId,
-          body: msg.body.slice(0, 200),
-          message: err instanceof Error ? err.message : String(err),
-        }),
-      );
-      await this.queue.ack(msg);
-      this.metrics?.queueAck('invalid_envelope');
-      return;
-    }
+    const envelope = await this.parseEnvelope(msg);
+    if (!envelope) return;
 
-    const validKinds = Object.values(WagerTransactionKind) as string[];
-    if (!validKinds.includes(envelope.data.kind)) {
-      this.logger.warn(
-        JSON.stringify({
-          event: 'wager_consumer.invalid_kind',
-          messageId: msg.messageId,
-          kind: envelope.data.kind,
-        }),
-      );
-      await this.queue.ack(msg);
-      this.metrics?.queueAck('invalid_kind');
+    const { kind } = envelope.data;
+
+    if (!ALL_KINDS.has(kind)) {
+      await this.reject(msg, 'wager_consumer.invalid_kind', { kind }, 'invalid_kind');
       return;
     }
-    if (envelope.data.kind === WagerTransactionKind.Opening) {
-      this.logger.warn(
-        JSON.stringify({
-          event: 'wager_consumer.opening_rejected',
-          messageId: msg.messageId,
-        }),
-      );
-      await this.queue.ack(msg);
-      this.metrics?.queueAck('invalid_kind');
+    if (kind === WagerTransactionKind.Opening) {
+      // `Opening` existe no enum mas é rejeitado no fluxo de entrada
+      // (não é uma transação aplicável — seria a criação inicial da wallet).
+      await this.reject(msg, 'wager_consumer.opening_rejected', {}, 'invalid_kind');
       return;
     }
 
@@ -181,7 +131,7 @@ export class WagerTransactionConsumer
         walletId: envelope.data.walletId,
         roundId: envelope.data.roundId,
         gameId: envelope.data.gameId,
-        kind: envelope.data.kind as WagerTransactionKind,
+        kind: kind as WagerTransactionKind,
         money: Money.from(envelope.data.money),
         referenceExternalTransactionId: envelope.data.referenceExternalTransactionId,
         payloadHash: payloadHashForEnvelope(envelope),
@@ -200,47 +150,122 @@ export class WagerTransactionConsumer
           transactionId: result.transactionId,
           walletId: envelope.data.walletId,
           providerId: envelope.data.providerId,
-          kind: envelope.data.kind,
+          kind,
           status: result.status,
           idempotentReplay: result.idempotentReplay,
         }),
       );
-      await this.queue.ack(msg);
-      this.metrics?.queueAck('processed');
+      await this.ack(msg, 'processed');
     } catch (err) {
       if (err instanceof WagerTransactionError) {
-        this.logger.warn(
-          JSON.stringify({
-            event: 'wager_consumer.domain_error',
-            instanceId: this.instanceId,
+        await this.reject(
+          msg,
+          'wager_consumer.domain_error',
+          {
             correlationId: envelope.data.idempotencyKey,
-            messageId: msg.messageId,
             walletId: envelope.data.walletId,
             providerId: envelope.data.providerId,
-            kind: envelope.data.kind,
+            kind,
             code: err.code,
-            message: err.message,
-          }),
+            err,
+          },
+          'domain_error',
         );
-        await this.queue.ack(msg);
-        this.metrics?.queueAck('domain_error');
         return;
       }
 
-      this.logger.warn(
-        JSON.stringify({
-          event: 'wager_consumer.transient_error',
-          instanceId: this.instanceId,
-          correlationId: envelope.data.idempotencyKey,
-          messageId: msg.messageId,
-          walletId: envelope.data.walletId,
-          providerId: envelope.data.providerId,
-          message: err instanceof Error ? err.message : String(err),
-        }),
-      );
+      this.warn('wager_consumer.transient_error', {
+        correlationId: envelope.data.idempotencyKey,
+        messageId: msg.messageId,
+        walletId: envelope.data.walletId,
+        providerId: envelope.data.providerId,
+        err,
+      });
       await this.queue.nack(msg, this.nackBackoffSeconds);
       this.metrics?.queueNack();
     }
+  }
+
+  // ── laço principal ──────────────────────────────────────────────
+
+  private async loop(): Promise<void> {
+    while (!this.stopped) {
+      this.running = true;
+      try {
+        const messages = await this.queue.receiveBatch(this.batchSize, this.waitSeconds);
+        if (messages.length > 0) {
+          this.metrics?.queueReceive(messages.length);
+        }
+        for (const msg of messages) {
+          if (this.stopped) break;
+          await this.processOne(msg);
+        }
+      } catch (err) {
+        this.warn('wager_consumer.loop_error', { err });
+        await new Promise((r) => setTimeout(r, this.pollMs));
+      } finally {
+        this.running = false;
+      }
+    }
+  }
+
+  // ── auxiliares ──────────────────────────────────────────────────
+
+  /** Decodifica + valida o formato. Retorna `null` (após ack + log) se inválido. */
+  private async parseEnvelope(
+    msg: QueueMessage,
+  ): Promise<WagerTransactionRequestedEnvelope | null> {
+    try {
+      const envelope = JSON.parse(msg.body) as WagerTransactionRequestedEnvelope;
+      if (
+        !envelope ||
+        envelope.type !== 'WagerTransactionRequested' ||
+        !envelope.data ||
+        !envelope.messageId
+      ) {
+        throw new Error('formato de envelope inválido');
+      }
+      return envelope;
+    } catch (err) {
+      await this.reject(
+        msg,
+        'wager_consumer.invalid_envelope',
+        { body: msg.body.slice(0, 200), err },
+        'invalid_envelope',
+      );
+      return null;
+    }
+  }
+
+  /** Registra o evento + ack + métrica. Usado para descartes definitivos. */
+  private async reject(
+    msg: QueueMessage,
+    event: string,
+    fields: Record<string, unknown>,
+    metricLabel: AckReason,
+  ): Promise<void> {
+    this.warn(event, { messageId: msg.messageId, ...fields });
+    await this.ack(msg, metricLabel);
+  }
+
+  private async ack(msg: QueueMessage, reason: AckReason): Promise<void> {
+    await this.queue.ack(msg);
+    this.metrics?.queueAck(reason);
+  }
+
+  /** Registro estruturado — extrai `.message` de `err` para combinar com o resto. */
+  private warn(event: string, fields: Record<string, unknown> = {}): void {
+    const { err, ...rest } = fields;
+    this.logger.warn(
+      JSON.stringify({
+        event,
+        instanceId: this.instanceId,
+        ...rest,
+        ...(err !== undefined
+          ? { message: err instanceof Error ? err.message : String(err) }
+          : {}),
+      }),
+    );
   }
 }
 

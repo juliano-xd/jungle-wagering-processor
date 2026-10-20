@@ -1,36 +1,21 @@
 import { NestFactory } from '@nestjs/core';
-import { Logger } from '@nestjs/common';
+import { INestApplication, Logger } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module.js';
 
-async function bootstrap(): Promise<void> {
-  const logger = new Logger('Bootstrap');
-  const app = await NestFactory.create(AppModule);
+// Validação é intencionalmente manual nos controllers (interfaces TS, não
+// classes decoradas). Introduzir `ValidationPipe`/`class-validator` exigiria
+// reescrever todos os DTOs — decisão consciente do projeto.
 
-  // ⚠️ NOTA: NÃO usamos `ValidationPipe`/`class-validator`.
-  // A validação é MANUAL nos controllers (`validateSubmitBody`, `assertUuid`,
-  // checagem de `money.amount` etc). Adicionar `ValidationPipe` exigiria
-  // reescrever todos os DTOs como classes decoradas — o projeto optou por
-  // validação explícita e tipada em TS puro, mais transparente para os
-  // contratos `Money`/`UUID`/`kind`.
-
-  // CORS conservador (dev local)
+function setupCors(app: INestApplication): void {
   app.enableCors({
     origin: process.env.CORS_ORIGINS?.split(',') ?? '*',
     credentials: false,
   });
+}
 
-  // Shutdown hooks — workers fazem `onApplicationShutdown`
-  app.enableShutdownHooks();
-
-  // ── OpenAPI / Swagger ────────────────────────────────────────────────
-  // Documentação interativa em http://localhost:3000/api (UI)
-  // e http://localhost:3000/api-json (spec JSON).
-  //
-  // Como o projeto usa interfaces TS (não classes decoradas), o Swagger
-  // gera docs a partir dos decorators `@ApiBody`/`@ApiResponse` dos
-  // controllers — ver `wagering.controller.ts` e `wallets.controller.ts`.
-  const swaggerConfig = new DocumentBuilder()
+function setupSwagger(app: INestApplication): void {
+  const config = new DocumentBuilder()
     .setTitle('Distributed Wagering Processor')
     .setDescription(
       'Serviço financeiro distribuído para processamento de apostas multi-provider.\n\n' +
@@ -52,13 +37,23 @@ async function bootstrap(): Promise<void> {
     )
     .build();
 
-  const document = SwaggerModule.createDocument(app, swaggerConfig);
+  const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api', app, document, {
     swaggerOptions: { persistAuthorization: true, tagsSorter: 'alpha' },
   });
+}
+
+async function bootstrap(): Promise<void> {
+  const logger = new Logger('Bootstrap');
+  const app = await NestFactory.create(AppModule);
+
+  setupCors(app);
+  app.enableShutdownHooks();
+  setupSwagger(app);
 
   const port = Number(process.env.PORT ?? 3000);
   await app.listen(port);
+
   logger.log(`🚀 Application listening on http://localhost:${port}`);
   logger.log(`📖 OpenAPI spec at http://localhost:${port}/api`);
   logger.log(`📊 Prometheus metrics at http://localhost:${port}/metrics`);
