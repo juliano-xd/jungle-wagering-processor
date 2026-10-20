@@ -73,32 +73,26 @@ Consulte [`ARCHITECTURE.md`](ARCHITECTURE.md) para o detalhamento completo.
 
 ## Quick start
 
-### Opção A — Docker Compose
+### Opção A — Docker Compose (recomendado)
 
 Sobe PostgreSQL e LocalStack. As filas SQS são criadas automaticamente.
 
 ```bash
 # 1. Subir a infraestrutura
-chmod +x scripts/localstack-init.sh
 docker compose up -d
 
-# 2. Confirmar as filas
+# 2. Confirmar as filas (leva ~5s após o container subir)
 docker exec jungle_localstack awslocal sqs list-queues
 
-# 3. Criar a configuração local
-cp .env.example .env
+# 3. Copiar a configuração pronta para Docker (porta 5433, QUEUE_BACKEND=aws)
+cp .env.docker .env
 
-# Configure, conforme necessário:
-# DB_PORT=5433
-# QUEUE_BACKEND=aws
-# SQS_ENDPOINT=http://localhost:4566
-
-# 4. Instalar dependências e aplicar migrations
+# 4. Instalar dependências e aplicar migrations no banco de dev
 bun install
 bun run migration:up
 
-# 5. Criar o banco de testes e executar a suíte
-bun run db:create-test
+# 5. Criar o banco de testes COM migrations e executar a suíte
+bun run db:reset-test
 bun run test
 
 # 6. Iniciar a aplicação
@@ -112,23 +106,28 @@ Filas esperadas:
 
 ### Opção B — PostgreSQL local + fila em memória
 
-Opção mais rápida para desenvolvimento. Requer PostgreSQL acessível em `127.0.0.1:5432`.
+Opção mais rápida. Requer PostgreSQL 15+ acessível em `127.0.0.1:5432`.
+
+Se você não tem PostgreSQL local rodando, suba um container avulso:
 
 ```bash
-# 1. Criar a configuração local
+docker run -d --name local-pg \
+  -p 5432:5432 \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  postgres:15
+```
+
+```bash
+# 1. Copiar a configuração local (porta 5432, QUEUE_BACKEND=memory)
 cp .env.example .env
 
-# Defaults esperados:
-# DB_PORT=5432
-# QUEUE_BACKEND=memory
-# OUTBOX_PUBLISHER_BACKEND=console
-
-# 2. Instalar dependências e aplicar migrations
+# 2. Instalar dependências e aplicar migrations no banco de dev
 bun install
 bun run migration:up
 
-# 3. Criar o banco de testes e executar a suíte
-bun run db:create-test
+# 3. Criar o banco de testes COM migrations e executar a suíte
+bun run db:reset-test
 bun run test
 
 # 4. Iniciar a aplicação
