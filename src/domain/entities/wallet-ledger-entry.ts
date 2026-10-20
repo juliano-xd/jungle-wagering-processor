@@ -58,12 +58,15 @@ export class WalletLedgerEntry {
       currency: this.moneyCurrency ?? 'BRL',
     });
   }
+
+  /** Hidratação do ORM — não chamar após `rehydrate()`. A imutabilidade real é garantida pelo trigger do banco. */
   set money(m: Money) {
     const p = m.toJSON();
     this.moneyAmount = p.amount;
     this.moneyCurrency = p.currency;
   }
 
+  /** Hidratação do ORM — não chamar após `rehydrate()`. */
   get balanceBefore(): Money {
     return Money.rehydrate({
       amount: this.balanceBeforeAmount ?? '0.00',

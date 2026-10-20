@@ -31,7 +31,12 @@ O sistema permanece correto quando mensagens chegam duplicadas, fora de ordem ou
 - **Value Object:** `Money` — imutável, string decimal, escala 2. Sem `number`, `float` ou `double` em nenhuma camada.
 - **Entidades:** `WagerTransaction`, `WalletLedgerEntry` (imutável), `IdempotencyRecord`, `InboxMessage` e `OutboxMessage`.
 - **Eventos de integração:** `IntegrationEvent<T>` abstrata, com subclasses concretas: `WagerTransactionProcessed`, `WalletBalanceChanged`, `WagerTransactionRejected` e `WagerTransactionPendingReference`. O payload serializa `MoneyProps` (string), nunca uma instância de `Money`.
-- **Boundaries:** domínio puro (sem MikroORM/NestJS), camada de aplicação (`WageringService`) e infraestrutura (MikroORM, HTTP, SQS e workers). Os testes de integração exercitam o agregado real contra PostgreSQL.
+- **Boundaries**: domínio com classes POJO puras (sem decorators, sem
+`extends` de base ORM/NestJS) + camada de aplicação (`WageringService`)
++ infraestrutura (MikroORM, HTTP, SQS, workers). Os `EntitySchema` do
+MikroORM coabitam os arquivos de entidade por coesão, mas são objetos
+de mapeamento — as classes em si não dependem do ORM em runtime. Os
+testes de integração exercitam o agregado real contra PostgreSQL.
 
 ### 2.1. Fluxos principais
 
